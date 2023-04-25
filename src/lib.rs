@@ -36,6 +36,15 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    pub fn push_front(&mut self, elem: T) {
+        self.ensure_reserved_front_space();
+        unsafe {
+            self.off -= 1;
+            self.len += 1;
+            ptr::write(self.ptr().add(self.off), elem);
+        }
+    }
+
     pub fn push_back(&mut self, elem: T) {
         self.ensure_reserved_back_space();
         unsafe {
@@ -43,6 +52,16 @@ impl<T> LinearDeque<T> {
         }
 
         self.len += 1;
+    }
+
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.len == 0 {
+            None
+        } else {
+            self.len -= 1;
+            self.off += 1;
+            unsafe { Some(ptr::read(self.ptr().add(self.off - 1))) }
+        }
     }
 
     pub fn pop_back(&mut self) -> Option<T> {
@@ -57,9 +76,17 @@ impl<T> LinearDeque<T> {
     pub fn insert(&mut self, index: usize, elem: T) {
         assert!(index <= self.len, "index out of bounds");
 
-        if index < self.len / 2 {
+        if 2 * index < self.len {
             // near front
-            todo!()
+            unsafe {
+                let pending_copy = self.prepare_reserved_front_space();
+                let (mut front_copy, back_copy) = pending_copy.split(index);
+                front_copy.dst -= 1;
+                back_copy.perform(self.ptr());
+                front_copy.perform(self.ptr());
+                self.off -= 1;
+                ptr::write(self.ptr().add(self.off + index), elem);
+            }
         } else {
             // near back
             unsafe {
@@ -111,6 +138,38 @@ impl<T> LinearDeque<T> {
                 vec: PhantomData,
             }
         }
+    }
+
+    fn ensure_reserved_front_space(&mut self) {
+        unsafe {
+            let pending_copy = self.prepare_reserved_front_space();
+            pending_copy.perform(self.ptr());
+        }
+    }
+
+    unsafe fn prepare_reserved_front_space(&mut self) -> PendingCopy {
+        let mut pending_copy = PendingCopy {
+            src: self.off,
+            dst: self.off,
+            count: self.len,
+        };
+
+        if self.reserved_front_space() > 0 {
+            // do nothing
+        } else if self.reserved_back_space() > self.len {
+            let moved_space = self.reserved_back_space() / 2;
+            pending_copy.dst += moved_space;
+            self.off += moved_space;
+        } else {
+            let added_space = self.len.max(1);
+            self.buf.realloc(self.cap() + added_space);
+            pending_copy.dst += added_space;
+            self.off += added_space;
+        }
+
+        debug_assert!(self.reserved_front_space() > 0);
+
+        pending_copy
     }
 
     fn ensure_reserved_back_space(&mut self) {
@@ -354,6 +413,79 @@ mod tests {
     }
 
     #[test]
+    fn push_front_growing() {
+        let mut deque: LinearDeque<char> = prepare_deque(0, [], 0);
+        // |[]|
+
+        deque.push_front('A');
+
+        // |[A]|
+        assert_deque!(deque, 0, ['A'], 0);
+
+        deque.push_front('B');
+
+        // |[BA]|
+        assert_deque!(deque, 0, ['B', 'A'], 0);
+
+        deque.push_front('C');
+
+        // |-[CBA]|
+        assert_deque!(deque, 1, ['C', 'B', 'A'], 0);
+
+        deque.push_front('D');
+
+        // |[DCBA]|
+        assert_deque!(deque, 0, ['D', 'C', 'B', 'A'], 0);
+
+        deque.push_front('E');
+
+        // |---[EDCBA]|
+        assert_deque!(deque, 3, ['E', 'D', 'C', 'B', 'A'], 0);
+    }
+
+    #[test]
+    fn push_front_using_reserved_back_space() {
+        let mut deque: LinearDeque<char> = prepare_deque(0, ['B', 'A'], 4);
+        // |[BA]----|
+
+        deque.push_front('C');
+
+        // |-[CBA]--|
+        assert_deque!(deque, 1, ['C', 'B', 'A'], 2);
+    }
+
+    #[test]
+    fn push_front_not_using_reserved_back_space() {
+        let mut deque: LinearDeque<char> = prepare_deque(0, ['B', 'A'], 1);
+        // |[BA]-|
+
+        deque.push_front('C');
+
+        // |-[CBA]-|
+        assert_deque!(deque, 1, ['C', 'B', 'A'], 1);
+
+        deque.push_front('D');
+
+        // |[DCBA]-|
+        assert_deque!(deque, 0, ['D', 'C', 'B', 'A'], 1);
+
+        deque.push_front('E');
+
+        // |---[EDCBA]-|
+        assert_deque!(deque, 3, ['E', 'D', 'C', 'B', 'A'], 1);
+    }
+
+    #[test]
+    fn push_front_zst() {
+        let mut deque = prepare_zst_deque(0);
+
+        deque.push_front(());
+        deque.push_front(());
+
+        assert_zst_deque!(deque, 2);
+    }
+
+    #[test]
     fn push_back_growing() {
         let mut deque: LinearDeque<char> = prepare_deque(0, [], 0);
         // |[]|
@@ -427,6 +559,46 @@ mod tests {
     }
 
     #[test]
+    fn pop_front() {
+        let mut deque = prepare_deque(1, ['B', 'A'], 2);
+        // |-[AB]--|
+
+        let popped = deque.pop_front();
+
+        assert_eq!(popped, Some('B'));
+        // |--[A]--|
+        assert_deque!(deque, 2, ['A'], 2);
+
+        let popped = deque.pop_front();
+
+        assert_eq!(popped, Some('A'));
+        // |---[]--|
+        assert_deque!(deque, 3, [], 2);
+
+        let popped = deque.pop_front();
+
+        assert_eq!(popped, None);
+        assert_deque!(deque, 3, [], 2);
+    }
+
+    #[test]
+    fn pop_front_zst() {
+        let mut deque = prepare_zst_deque(2);
+
+        let popped = deque.pop_front();
+        assert_eq!(popped, Some(()));
+        assert_zst_deque!(deque, 1);
+
+        let popped = deque.pop_front();
+        assert_eq!(popped, Some(()));
+        assert_zst_deque!(deque, 0);
+
+        let popped = deque.pop_front();
+        assert_eq!(popped, None);
+        assert_zst_deque!(deque, 0);
+    }
+
+    #[test]
     fn pop_back() {
         let mut deque = prepare_deque(2, ['A', 'B'], 1);
         // |--[AB]-|
@@ -467,6 +639,39 @@ mod tests {
     }
 
     #[test]
+    fn insert_near_front_using_reserved_front_space() {
+        let mut deque = prepare_deque(1, ['A', 'B', 'C'], 1);
+        // |-[ABC]-|
+
+        deque.insert(1, 'x');
+
+        // |[AxBC]-|
+        assert_deque!(deque, 0, ['A', 'x', 'B', 'C'], 1);
+    }
+
+    #[test]
+    fn insert_near_front_reallocating() {
+        let mut deque = prepare_deque(0, ['A', 'B', 'C'], 1);
+        // |[ABC]-|
+
+        deque.insert(1, 'x');
+
+        // |--[AxBC]-|
+        assert_deque!(deque, 2, ['A', 'x', 'B', 'C'], 1);
+    }
+
+    #[test]
+    fn insert_near_front_using_reserved_back_space() {
+        let mut deque = prepare_deque(0, ['A', 'B', 'C'], 4);
+        // |[ABC]----|
+
+        deque.insert(1, 'x');
+
+        // |-[AxBC]--|
+        assert_deque!(deque, 1, ['A', 'x', 'B', 'C'], 2);
+    }
+
+    #[test]
     fn insert_near_back_using_reserved_back_space() {
         let mut deque = prepare_deque(1, ['A', 'B', 'C'], 1);
         // |-[ABC]-|
@@ -504,7 +709,7 @@ mod tests {
         let mut deque = LinearDeque::new();
 
         deque.insert(0, ());
-        deque.insert(1, ());
+        deque.insert(0, ());
         deque.insert(2, ());
         deque.insert(2, ());
 
