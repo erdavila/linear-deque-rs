@@ -40,6 +40,9 @@ use iter::RawValIter;
 mod buffer;
 mod iter;
 
+#[cfg(test)]
+mod drop_tracker;
+
 /// A double-ended queue implemented with a growable linear buffer.
 ///
 /// A `LinearDeque` with a known list of items can be initialized from an array:
@@ -445,6 +448,156 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Shortens the deque, keeping the last `len` elements and dropping
+    /// the rest.
+    ///
+    /// If `len` is greater than the deque's current length, this has no
+    /// effect.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::new();
+    /// buf.push_back(5);
+    /// buf.push_back(10);
+    /// buf.push_back(15);
+    /// assert_eq!(buf, [5, 10, 15]);
+    /// buf.truncate_at_front(1);
+    /// assert_eq!(buf, [15]);
+    /// ```
+    pub fn truncate_at_front(&mut self, len: usize) {
+        if len < self.len {
+            unsafe {
+                let count = self.len() - len;
+                let front = self.get_unchecked_mut(..count);
+                ptr::drop_in_place(front);
+                self.off += count;
+                self.len = len;
+            }
+        }
+    }
+
+    /// Shortens the deque, keeping the first `len` elements and dropping
+    /// the rest.
+    ///
+    /// If `len` is greater than the deque's current length, this has no
+    /// effect.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::new();
+    /// buf.push_back(5);
+    /// buf.push_back(10);
+    /// buf.push_back(15);
+    /// assert_eq!(buf, [5, 10, 15]);
+    /// buf.truncate_at_back(1);
+    /// assert_eq!(buf, [5]);
+    /// ```
+    pub fn truncate_at_back(&mut self, len: usize) {
+        if len < self.len {
+            unsafe {
+                let back = self.get_unchecked_mut(len..);
+                ptr::drop_in_place(back);
+                self.len = len;
+            }
+        }
+    }
+
+    /// Shortens the deque, keeping the first `len` elements and dropping
+    /// the rest.
+    ///
+    /// It is just an alias for [`truncate_at_back`].
+    ///
+    /// [`truncate_at_back`]: LinearDeque::truncate_at_back
+    #[inline]
+    pub fn truncate(&mut self, len: usize) {
+        self.truncate_at_back(len);
+    }
+
+    /// Clears the deque, removing all values.
+    ///
+    /// After clearing, the reserved space is equally distributed to the front
+    /// and back ends.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::new();
+    /// deque.push_back(1);
+    /// deque.clear();
+    /// assert!(deque.is_empty());
+    /// ```
+    pub fn clear(&mut self) {
+        self.truncate_at_back(0);
+        self.off = self.cap() / 2;
+    }
+
+    /// Sets the reserved space on both ends of the deque.
+    ///
+    /// When the reserved front space is changed, the existing elements are moved.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::{LinearDeque, SetReservedSpace};
+    ///
+    /// let mut deque: LinearDeque<i32> = LinearDeque::with_reserved_space(3, 7);
+    /// assert_eq!(deque.reserved_front_space(), 3);
+    /// assert_eq!(deque.reserved_back_space(), 7);
+    ///
+    /// deque.set_reserved_space(SetReservedSpace::GrowTo(8), SetReservedSpace::Keep);
+    /// assert_eq!(deque.reserved_front_space(), 8);
+    /// assert_eq!(deque.reserved_back_space(), 7);
+    /// ```
+    pub fn set_reserved_space(&mut self, front: SetReservedSpace, back: SetReservedSpace) {
+        if is_zst::<T>() {
+            return;
+        }
+
+        let front_space = self.reserved_front_space();
+        let back_space = self.reserved_back_space();
+        let cap = self.cap();
+
+        fn new_space(current: usize, set: SetReservedSpace) -> usize {
+            match set {
+                SetReservedSpace::Keep => current,
+                SetReservedSpace::ShrinkTo(new) => current.min(new),
+                SetReservedSpace::GrowTo(new) => current.max(new),
+                SetReservedSpace::Exact(new) => new,
+            }
+        }
+
+        let new_front_space = new_space(front_space, front);
+        let new_back_space = new_space(back_space, back);
+        let new_cap = new_front_space + self.len + new_back_space;
+
+        if new_cap > cap {
+            self.buf.realloc(new_cap);
+        }
+
+        if new_front_space != front_space {
+            unsafe {
+                ptr::copy(
+                    self.ptr().add(front_space),
+                    self.ptr().add(new_front_space),
+                    self.len,
+                );
+            }
+            self.off = new_front_space;
+        }
+
+        if new_cap < cap {
+            self.buf.realloc(new_cap);
+        }
+    }
+
     fn ensure_reserved_front_space(&mut self) {
         unsafe {
             let pending_copy = self.prepare_reserved_front_space();
@@ -690,6 +843,29 @@ impl PendingCopy {
     }
 }
 
+/// Defines what happens to the reserved space of one of the deque ends on a call
+/// to [`set_reserved_space`].
+///
+/// [`set_reserved_space`]: LinearDeque::set_reserved_space
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SetReservedSpace {
+    /// The reserved space is not changed.
+    Keep,
+
+    /// The reserved space is shrunk to the specified size.
+    ///
+    /// If the current space is less than the wanted size, then this is a no-op.
+    ShrinkTo(usize),
+
+    /// The reserved space is grown to the specified size.
+    ///
+    /// If the current space is greater than the wanted size, then this is a no-op.
+    GrowTo(usize),
+
+    /// The reserved space is unconditionally changed to the specified size.
+    Exact(usize),
+}
+
 /// An owning iterator over the elements of a `LinearDeque`.
 ///
 /// This `struct` is created by the [`into_iter`] method on [`LinearDeque`]
@@ -766,12 +942,13 @@ mod tests {
     use std::hash::{Hash, Hasher};
     use std::{mem, ptr};
 
-    use crate::LinearDeque;
+    use crate::drop_tracker::DropTracker;
+    use crate::{LinearDeque, SetReservedSpace};
 
     macro_rules! assert_deque {
         ($deque:ident, $expected_reserved_front_space:expr, $expected_elems:expr, $expected_reserved_back_space:expr $(,)?) => {{
             let expected_reserved_front_space = $expected_reserved_front_space;
-            let expected_elems = $expected_elems;
+            let expected_elems: Vec<_> = $expected_elems.into_iter().collect();
             let expected_reserved_back_space = $expected_reserved_back_space;
 
             let expected_len = expected_elems.len();
@@ -779,19 +956,27 @@ mod tests {
                 expected_reserved_front_space + expected_len + expected_reserved_back_space;
             let expected_off = expected_reserved_front_space;
 
-            assert_eq!($deque.cap(), expected_capacity);
-            assert_eq!($deque.len, expected_len);
-            assert_eq!($deque.off, expected_off);
+            assert_eq!($deque.cap(), expected_capacity, "cap");
+            assert_eq!($deque.len, expected_len, "len");
+            assert_eq!($deque.off, expected_off, "off");
             for (i, expected_elem) in expected_elems.into_iter().enumerate() {
                 let elem = unsafe { ptr::read($deque.ptr().add($deque.off + i)) };
-                assert_eq!(elem, expected_elem);
+                assert_eq!(elem, expected_elem, "index {i}");
             }
-            assert_eq!($deque.reserved_front_space(), expected_reserved_front_space);
-            assert_eq!($deque.reserved_back_space(), expected_reserved_back_space);
+            assert_eq!(
+                $deque.reserved_front_space(),
+                expected_reserved_front_space,
+                "front space"
+            );
+            assert_eq!(
+                $deque.reserved_back_space(),
+                expected_reserved_back_space,
+                "back_space"
+            );
         }};
     }
 
-    fn prepare_deque<T: Copy + Eq + Debug>(
+    fn prepare_deque<T: Clone + Eq + Debug>(
         reserved_front_space: usize,
         elems: impl IntoIterator<Item = T>,
         reserved_back_space: usize,
@@ -806,7 +991,7 @@ mod tests {
             deque.off = reserved_front_space;
             for (i, elem) in elems.iter().enumerate() {
                 unsafe {
-                    ptr::write(deque.ptr().add(deque.off + i), *elem);
+                    ptr::write(deque.ptr().add(deque.off + i), elem.clone());
                 }
             }
         }
@@ -1349,6 +1534,160 @@ mod tests {
         let iter = deque.into_iter();
 
         assert_eq!(iter.count(), 4);
+    }
+
+    #[test]
+    fn truncate_at_front() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(5, drop_tracker.wrap_iter('A'..='F'), 1);
+        // |-----[ABCDEF]-|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.truncate_at_front(2);
+        });
+
+        // |---------[EF]-|
+        assert_deque!(deque, 9, drop_tracker.wrap_iter('E'..='F'), 1);
+        assert_eq!(dropped, Vec::from_iter('A'..='D'));
+    }
+
+    #[test]
+    fn truncate_at_front_zst() {
+        let mut deque: LinearDeque<()> = prepare_zst_deque(4);
+
+        deque.truncate_at_front(3);
+
+        assert_zst_deque!(deque, 3);
+    }
+
+    #[test]
+    fn truncate_at_back() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(1, drop_tracker.wrap_iter('A'..='F'), 5);
+        // |-[ABCDEF]-----|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.truncate_at_back(2);
+        });
+
+        // |-[AB]---------|
+        assert_deque!(deque, 1, drop_tracker.wrap_iter('A'..='B'), 9);
+        assert_eq!(dropped, Vec::from_iter('C'..='F'));
+    }
+
+    #[test]
+    fn truncate_at_back_zst() {
+        let mut deque: LinearDeque<()> = prepare_zst_deque(4);
+
+        deque.truncate_at_back(3);
+
+        assert_zst_deque!(deque, 3);
+    }
+
+    #[test]
+    fn clear() {
+        let mut deque = prepare_deque(2, 'A'..='D', 4);
+        // |--[ABCD]----|
+
+        deque.clear();
+
+        // |-----[]-----|
+        assert_deque!(deque, 5, [], 5);
+    }
+
+    #[test]
+    fn clear_zst() {
+        let mut deque: LinearDeque<()> = prepare_zst_deque(4);
+
+        deque.clear();
+
+        assert_zst_deque!(deque, 0);
+    }
+
+    #[test]
+    fn set_reserved_space_keeping() {
+        let mut deque = prepare_deque(2, 'A'..='D', 5);
+        // |--[ABCD]-----|
+
+        deque.set_reserved_space(SetReservedSpace::Keep, SetReservedSpace::Keep);
+
+        // |--[ABCD]-----|
+        assert_deque!(deque, 2, 'A'..='D', 5);
+    }
+
+    #[test]
+    fn set_reserved_space_growing() {
+        let mut deque = prepare_deque(3, 'A'..='D', 1);
+        // |---[ABCD]-|
+
+        deque.set_reserved_space(SetReservedSpace::GrowTo(6), SetReservedSpace::GrowTo(2));
+
+        // |------[ABCD]--|
+        assert_deque!(deque, 6, 'A'..='D', 2);
+    }
+
+    #[test]
+    fn set_reserved_space_not_growing() {
+        let mut deque = prepare_deque(3, 'A'..='D', 1);
+        // |---[ABCD]-|
+
+        deque.set_reserved_space(SetReservedSpace::GrowTo(2), SetReservedSpace::GrowTo(1));
+
+        // |---[ABCD]-|
+        assert_deque!(deque, 3, 'A'..='D', 1);
+    }
+
+    #[test]
+    fn set_reserved_space_shrinking() {
+        let mut deque = prepare_deque(5, 'A'..='D', 2);
+        // |-----[ABCD]--|
+
+        deque.set_reserved_space(SetReservedSpace::ShrinkTo(2), SetReservedSpace::ShrinkTo(1));
+
+        // |--[ABCD]-|
+        assert_deque!(deque, 2, 'A'..='D', 1);
+    }
+
+    #[test]
+    fn set_reserved_space_not_shrinking() {
+        let mut deque = prepare_deque(5, 'A'..='D', 2);
+        // |-----[ABCD]--|
+
+        deque.set_reserved_space(SetReservedSpace::ShrinkTo(6), SetReservedSpace::ShrinkTo(3));
+
+        // |-----[ABCD]--|
+        assert_deque!(deque, 5, 'A'..='D', 2);
+    }
+
+    #[test]
+    fn set_reserved_space_exactly_growing() {
+        let mut deque = prepare_deque(2, 'A'..='D', 1);
+        // |--[ABCD]-|
+
+        deque.set_reserved_space(SetReservedSpace::Exact(5), SetReservedSpace::Exact(2));
+
+        // |-----[ABCD]--|
+        assert_deque!(deque, 5, 'A'..='D', 2);
+    }
+
+    #[test]
+    fn set_reserved_space_exactly_shrinking() {
+        let mut deque = prepare_deque(5, 'A'..='D', 2);
+        // |-----[ABCD]--|
+
+        deque.set_reserved_space(SetReservedSpace::Exact(2), SetReservedSpace::Exact(1));
+
+        // |--[ABCD]-|
+        assert_deque!(deque, 2, 'A'..='D', 1);
+    }
+
+    #[test]
+    fn set_reserved_space_zst() {
+        let mut deque: LinearDeque<()> = prepare_zst_deque(5);
+
+        deque.set_reserved_space(SetReservedSpace::Exact(3), SetReservedSpace::Exact(4));
+
+        assert_zst_deque!(deque, 5);
     }
 
     #[test]
