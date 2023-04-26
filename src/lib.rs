@@ -602,6 +602,91 @@ impl<T> LinearDeque<T> {
         self.resize_at_back_with(new_len, f);
     }
 
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all elements `e` for which `f(&e)` returns false.
+    /// This method operates in place, visiting each element exactly once in the
+    /// original order, and preserves the order of the retained elements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::from_iter(1..=5);
+    /// buf.retain(|&x| x % 2 == 0);
+    /// assert_eq!(buf, [2, 4]);
+    /// ```
+    ///
+    /// Because the elements are visited exactly once in the original order,
+    /// external state may be used to decide which elements to keep.
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::from_iter(1..6);
+    ///
+    /// let keep = [false, true, true, false, true];
+    /// let mut iter = keep.iter();
+    /// buf.retain(|_| *iter.next().unwrap());
+    /// assert_eq!(buf, [2, 3, 5]);
+    /// ```
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.retain_mut(|x| f(x));
+    }
+
+    /// Retains only the elements specified by the predicate, passing a mutable reference to it.
+    ///
+    /// In other words, remove all elements `e` such that `f(&mut e)` returns `false`.
+    /// This method operates in place, visiting each element exactly once in the
+    /// original order, and preserves the order of the retained elements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::from([1, 2, 3, 4, 5]);
+    /// deque.retain_mut(|x| if *x % 2 == 0 {
+    ///     *x += 1;
+    ///     true
+    /// } else {
+    ///     false
+    /// });
+    /// assert_eq!(deque, [3, 5]);
+    /// ```
+    pub fn retain_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut T) -> bool,
+    {
+        unsafe {
+            let mut dropped_index_option = None;
+
+            let base = self.ptr().add(self.off);
+            for i in 0..self.len {
+                let p = base.add(i);
+                if f(&mut *p) {
+                    if let Some(dropped_index) = dropped_index_option {
+                        ptr::copy_nonoverlapping(p, base.add(dropped_index), 1);
+                        dropped_index_option = Some(dropped_index + 1);
+                    }
+                } else {
+                    p.drop_in_place();
+                    if dropped_index_option.is_none() {
+                        dropped_index_option = Some(i);
+                    }
+                }
+            }
+
+            if let Some(dropped_index) = dropped_index_option {
+                self.len = dropped_index;
+            }
+        }
+    }
+
     /// Shortens the deque, keeping the last `len` elements and dropping
     /// the rest.
     ///
@@ -1912,6 +1997,86 @@ mod tests {
 
         deque.resize_at_back_with(4, || ());
         assert_zst_deque!(deque, 4);
+    }
+
+    #[test]
+    fn retain() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(2, drop_tracker.wrap_iter(['A', 'b', 'c', 'D', 'e']), 1);
+        // |--[AbcDe]-|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.retain(|c| c.value.is_lowercase());
+        });
+
+        // |--[bce]---|
+        assert_deque!(deque, 2, drop_tracker.wrap_iter(['b', 'c', 'e']), 3);
+        assert_eq!(dropped, ['A', 'D']);
+    }
+
+    #[test]
+    fn retain_mut() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(2, drop_tracker.wrap_iter(['A', 'b', 'c', 'D', 'e']), 1);
+        // |--[AbcDe]-|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.retain_mut(|c| {
+                if c.value.is_lowercase() {
+                    c.value = c.value.to_uppercase().next().unwrap();
+                    true
+                } else {
+                    false
+                }
+            });
+        });
+
+        // |--[BCE]---|
+        assert_deque!(deque, 2, drop_tracker.wrap_iter(['B', 'C', 'E']), 3);
+        assert_eq!(dropped, ['A', 'D']);
+    }
+
+    #[test]
+    fn retain_mut_drop_none() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(2, drop_tracker.wrap_iter('A'..='E'), 1);
+        // |--[ABCDE]-|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.retain_mut(|_| true);
+        });
+
+        // |--[ABCDE]-|
+        assert_deque!(deque, 2, drop_tracker.wrap_iter('A'..='E'), 1);
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn retain_mut_drop_all() {
+        let mut drop_tracker = DropTracker::new();
+        let mut deque = prepare_deque(2, drop_tracker.wrap_iter('A'..='E'), 1);
+        // |--[ABCDE]-|
+
+        let (dropped, _) = drop_tracker.track(|| {
+            deque.retain_mut(|_| false);
+        });
+
+        // |--[]------|
+        assert_deque!(deque, 2, [], 6);
+        assert_eq!(dropped, Vec::from_iter('A'..='E'));
+    }
+
+    #[test]
+    fn retain_mut_zst() {
+        let mut deque: LinearDeque<()> = prepare_zst_deque(4);
+
+        let mut p = false;
+        deque.retain(|_| {
+            p = !p;
+            p
+        });
+
+        assert_zst_deque!(deque, 2);
     }
 
     #[test]

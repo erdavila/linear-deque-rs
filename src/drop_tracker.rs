@@ -42,7 +42,7 @@ impl<T: Clone> DropTracker<T> {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DropTrackerWrapper<T: Clone> {
-    value: T,
+    pub value: T,
     tracker: NonNull<DropTracker<T>>,
 }
 impl<T: Clone> Drop for DropTrackerWrapper<T> {
