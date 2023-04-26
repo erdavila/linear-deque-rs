@@ -31,6 +31,7 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
@@ -1167,6 +1168,27 @@ impl<T> FromIterator<T> for LinearDeque<T> {
     }
 }
 
+impl Read for LinearDeque<u8> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = (self.deref() as &[u8]).read(buf);
+        if let Ok(ref count) = result {
+            self.truncate_at_front(self.len - count);
+        }
+        result
+    }
+}
+
+impl Write for LinearDeque<u8> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl<T: Debug> Debug for LinearDeque<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinearDeque")
@@ -1305,6 +1327,7 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::fmt::Debug;
     use std::hash::{Hash, Hasher};
+    use std::io::{Read, Write};
     use std::{mem, ptr};
 
     use crate::drop_tracker::DropTracker;
@@ -2435,5 +2458,32 @@ mod tests {
         let deque = LinearDeque::from_iter(std::iter::repeat(()).take(4));
 
         assert_zst_deque!(deque, 4);
+    }
+
+    #[test]
+    fn read() {
+        let mut deque = prepare_deque(1, b'A'..=b'E', 2);
+        // |-[ABCDE]--|
+        let mut buf = [b'0'; 3];
+
+        let result = deque.read(&mut buf);
+
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(buf, [b'A', b'B', b'C']);
+        // |----[DE]--|
+        assert_deque!(deque, 4, [b'D', b'E'], 2);
+    }
+
+    #[test]
+    fn write() {
+        let mut deque = prepare_deque(2, b'A'..=b'C', 1);
+        // |--[ABC]-|
+        let buf: Vec<_> = (b'D'..=b'H').collect();
+
+        let result = deque.write(&buf);
+
+        assert_eq!(result.unwrap(), 5);
+        // |[ABCDEFGH]-|
+        assert_deque!(deque, 0, b'A'..=b'H', 1);
     }
 }
