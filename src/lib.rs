@@ -89,6 +89,90 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Provides a reference to the front element, or `None` if the deque is
+    /// empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// assert_eq!(d.front(), None);
+    ///
+    /// d.push_back(1);
+    /// d.push_back(2);
+    /// assert_eq!(d.front(), Some(&1));
+    /// ```
+    pub fn front(&self) -> Option<&T> {
+        self.first()
+    }
+
+    /// Provides a mutable reference to the front element, or `None` if the
+    /// deque is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// assert_eq!(d.front_mut(), None);
+    ///
+    /// d.push_back(1);
+    /// d.push_back(2);
+    /// match d.front_mut() {
+    ///     Some(x) => *x = 9,
+    ///     None => (),
+    /// }
+    /// assert_eq!(d.front(), Some(&9));
+    /// ```
+    pub fn front_mut(&mut self) -> Option<&mut T> {
+        self.first_mut()
+    }
+
+    /// Provides a reference to the back element, or `None` if the deque is
+    /// empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// assert_eq!(d.back(), None);
+    ///
+    /// d.push_back(1);
+    /// d.push_back(2);
+    /// assert_eq!(d.back(), Some(&2));
+    /// ```
+    pub fn back(&self) -> Option<&T> {
+        self.last()
+    }
+
+    /// Provides a mutable reference to the back element, or `None` if the
+    /// deque is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// assert_eq!(d.back(), None);
+    ///
+    /// d.push_back(1);
+    /// d.push_back(2);
+    /// match d.back_mut() {
+    ///     Some(x) => *x = 9,
+    ///     None => (),
+    /// }
+    /// assert_eq!(d.back(), Some(&9));
+    /// ```
+    pub fn back_mut(&mut self) -> Option<&mut T> {
+        self.last_mut()
+    }
+
     /// Prepends an element to the deque.
     ///
     /// # Example
@@ -99,9 +183,7 @@ impl<T> LinearDeque<T> {
     /// let mut d = LinearDeque::new();
     /// d.push_front(1);
     /// d.push_front(2);
-    /* TODO: front() not implemented yet
     /// assert_eq!(d.front(), Some(&2));
-     */
     /// ```
     pub fn push_front(&mut self, elem: T) {
         self.ensure_reserved_front_space();
@@ -122,9 +204,7 @@ impl<T> LinearDeque<T> {
     /// let mut buf = LinearDeque::new();
     /// buf.push_back(1);
     /// buf.push_back(3);
-    /* TODO: back() is not implemented yet
     /// assert_eq!(3, *buf.back().unwrap());
-     */
     /// ```
     pub fn push_back(&mut self, elem: T) {
         self.ensure_reserved_back_space();
@@ -628,6 +708,24 @@ mod tests {
         let deque: LinearDeque<()> = LinearDeque::new();
 
         assert_zst_deque!(deque, 0);
+    }
+
+    #[test]
+    fn front_zst() {
+        let deque: LinearDeque<()> = prepare_zst_deque(0);
+        assert_eq!(deque.front(), None);
+
+        let deque: LinearDeque<()> = prepare_zst_deque(2);
+        assert_eq!(deque.front(), Some(&()));
+    }
+
+    #[test]
+    fn back_zst() {
+        let deque: LinearDeque<()> = prepare_zst_deque(0);
+        assert_eq!(deque.back(), None);
+
+        let deque: LinearDeque<()> = prepare_zst_deque(2);
+        assert_eq!(deque.back(), Some(&()));
     }
 
     #[test]
