@@ -1,3 +1,33 @@
+#![warn(missing_docs)]
+#![doc(test(attr(deny(warnings))))]
+
+//! A double-ended queue that can be sliced at any time without preparation.
+//!
+//! # [`LinearDeque`] vs [`VecDeque`]
+//!
+//! ## Slicing
+//!
+//! The standard [`VecDeque`] uses a ring buffer. It requires that the
+//! [`make_contiguous`] method is called to ensure that the deque content can
+//! all be referenced in a single slice. [`make_contiguous`] is only callable on
+//! a mutable instance of the deque.
+//!
+//! The [`LinearDeque`] provided by this lib uses a linear buffer, keeping all
+//! its content contiguous and allowing to have a slice with all the content at
+//! any time, even when the deque is not mutable.
+//!
+//! ## Memory Usage
+//!
+//! By using a ring buffer, all spare memory allocated by the standard
+//! [`VecDeque`] can be used for elements added at both the front and the back
+//! ends.
+//!
+//! Using a linear buffer, each end of the [`LinearDeque`] have its own reserved
+//! memory, so it tends to use more memory than [`VecDeque`].
+//!
+//! [`VecDeque`]: std::collections::VecDeque
+//! [`make_contiguous`]: std::collections::VecDeque::make_contiguous
+
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -9,6 +39,20 @@ use iter::RawValIter;
 mod buffer;
 mod iter;
 
+/// A double-ended queue implemented with a growable linear buffer.
+///
+/* TODO: from not implemented yet
+/// A `LinearDeque` with a known list of items can be initialized from an array:
+///
+/// ```
+/// use linear_deque::LinearDeque;
+///
+/// let deq = LinearDeque::from([-1, 0, 1]);
+/// ```
+ */
+///
+/// Since `LinearDeque` is a linear buffer, its elements are contiguous in
+/// memory, and it can be coerced into a slice at any time.
 #[derive(Debug)]
 pub struct LinearDeque<T> {
     buf: Buffer<T>,
@@ -28,6 +72,15 @@ impl<T> LinearDeque<T> {
         self.buf.cap
     }
 
+    /// Creates an empty deque.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    /// # #[allow(unused)]
+    /// let deque: LinearDeque<u32> = LinearDeque::new();
+    /// ```
     pub fn new() -> Self {
         LinearDeque {
             buf: Buffer::new(),
@@ -36,6 +89,20 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Prepends an element to the deque.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// d.push_front(1);
+    /// d.push_front(2);
+    /* TODO: front() not implemented yet
+    /// assert_eq!(d.front(), Some(&2));
+     */
+    /// ```
     pub fn push_front(&mut self, elem: T) {
         self.ensure_reserved_front_space();
         unsafe {
@@ -45,6 +112,20 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Appends an element to the back of the deque.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::new();
+    /// buf.push_back(1);
+    /// buf.push_back(3);
+    /* TODO: back() is not implemented yet
+    /// assert_eq!(3, *buf.back().unwrap());
+     */
+    /// ```
     pub fn push_back(&mut self, elem: T) {
         self.ensure_reserved_back_space();
         unsafe {
@@ -54,6 +135,22 @@ impl<T> LinearDeque<T> {
         self.len += 1;
     }
 
+    /// Removes the first element and returns it, or `None` if the deque is
+    /// empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut d = LinearDeque::new();
+    /// d.push_back(1);
+    /// d.push_back(2);
+    ///
+    /// assert_eq!(d.pop_front(), Some(1));
+    /// assert_eq!(d.pop_front(), Some(2));
+    /// assert_eq!(d.pop_front(), None);
+    /// ```
     pub fn pop_front(&mut self) -> Option<T> {
         if self.len == 0 {
             None
@@ -64,6 +161,20 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Removes the last element from the deque and returns it, or `None` if
+    /// it is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::new();
+    /// assert_eq!(buf.pop_back(), None);
+    /// buf.push_back(1);
+    /// buf.push_back(3);
+    /// assert_eq!(buf.pop_back(), Some(3));
+    /// ```
     pub fn pop_back(&mut self) -> Option<T> {
         if self.len == 0 {
             None
@@ -73,6 +184,37 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Inserts an element at `index` within the deque, shifting all elements
+    /// before or after the index.
+    ///
+    /// If `index` is nearer to the front, the elements with indices lower than
+    /// `index` are moved to the left; otherwise, the elements with indices
+    /// grater than `index` are moved right.
+    ///
+    /// Element at index 0 is the front of the queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is greater than deque's length
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::new();
+    /// deque.push_back('a');
+    /// deque.push_back('b');
+    /// deque.push_back('c');
+    /* TODO: Eq not implemented
+    /// assert_eq!(deque, &['a', 'b', 'c']);
+     */
+    ///
+    /// deque.insert(1, 'd');
+    /* TODO: Eq not implemented
+    /// assert_eq!(deque, &['a', 'd', 'b', 'c']);
+     */
+    /// ```
     pub fn insert(&mut self, index: usize, elem: T) {
         assert!(index <= self.len, "index out of bounds");
 
@@ -101,6 +243,31 @@ impl<T> LinearDeque<T> {
         self.len += 1;
     }
 
+    /// Removes and returns the element at `index` from the deque.
+    /// Whichever end is closer to the removal point will be moved to make
+    /// room, and all the affected elements will be moved to new positions.
+    /// Returns `None` if `index` is out of bounds.
+    ///
+    /// Element at index 0 is the front of the queue.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::new();
+    /// buf.push_back(1);
+    /// buf.push_back(2);
+    /// buf.push_back(3);
+    /* TODO: implement Eq
+    /// assert_eq!(buf, [1, 2, 3]);
+     */
+    ///
+    /// assert_eq!(buf.remove(1), Some(2));
+    /* TODO: implement Eq
+    /// assert_eq!(buf, [1, 3]);
+     */
+    /// ```
     pub fn remove(&mut self, index: usize) -> Option<T> {
         if index < self.len {
             unsafe {
@@ -124,8 +291,46 @@ impl<T> LinearDeque<T> {
         }
     }
 
-    // TODO: document that after draining the remaining allocated space is
-    // equally splitted as reserved space for front and back.
+    /// Removes all elements from the deque in bulk, returning all removed
+    /// elements as an iterator. If the iterator is dropped before being fully
+    /// consumed, it drops the remaining removed elements.
+    ///
+    /// The returned iterator keeps a mutable borrow on the queue to optimize
+    /// its implementation.
+    ///
+    /// After draining, the remaining unused allocated memory is equaly split
+    /// as reserved space for both ends.
+    ///
+    /* TODO: range parameter is not implemented.
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the deque.
+     */
+    ///
+    /// # Leaking
+    ///
+    /// If the returned iterator goes out of scope without being dropped (due to
+    /// [`mem::forget`], for example), the deque may have lost and leaked
+    /// elements arbitrarily, including elements outside the range.
+    /* TODO: range parameter.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque: LinearDeque<_> = [1, 2, 3].into();
+    /// let drained = deque.drain(2..).collect::<LinearDeque<_>>();
+    /// assert_eq!(drained, [3]);
+    /// assert_eq!(deque, [1, 2]);
+    ///
+    /// // A full range clears all contents, like `clear()` does
+    /// deque.drain(..);
+    /// assert!(deque.is_empty());
+    /// ```
+     */
+    // TODO: implement range parameter.
     pub fn drain(&mut self) -> Drain<T> {
         unsafe {
             let iter = RawValIter::new(self);
@@ -280,6 +485,13 @@ impl PendingCopy {
     }
 }
 
+/// An owning iterator over the elements of a `LinearDeque`.
+///
+/// This `struct` is created by the [`into_iter`] method on [`LinearDeque`]
+/// (provided by the [`IntoIterator`] trait). See its documentation for more.
+///
+/// [`into_iter`]: LinearDeque::into_iter
+/// [`IntoIterator`]: core::iter::IntoIterator
 pub struct IntoIter<T> {
     _buf: Buffer<T>,
     iter: RawValIter<T>,
@@ -309,6 +521,12 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
+/// A draining iterator over the elements of a `LinearDeque`.
+///
+/// This `struct` is created by the [`drain`] method on [`LinearDeque`]. See its
+/// documentation for more.
+///
+/// [`drain`]: LinearDeque::drain
 pub struct Drain<'a, T: 'a> {
     vec: PhantomData<&'a mut LinearDeque<T>>,
     iter: RawValIter<T>,
