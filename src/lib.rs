@@ -42,15 +42,14 @@ mod iter;
 
 /// A double-ended queue implemented with a growable linear buffer.
 ///
-/* TODO: from not implemented yet
 /// A `LinearDeque` with a known list of items can be initialized from an array:
 ///
 /// ```
 /// use linear_deque::LinearDeque;
 ///
+/// # #[allow(unused)]
 /// let deq = LinearDeque::from([-1, 0, 1]);
 /// ```
- */
 ///
 /// Since `LinearDeque` is a linear buffer, its elements are contiguous in
 /// memory, and it can be coerced into a slice at any time.
@@ -83,10 +82,34 @@ impl<T> LinearDeque<T> {
     /// let deque: LinearDeque<u32> = LinearDeque::new();
     /// ```
     pub fn new() -> Self {
+        Self::with_reserved_space(0, 0)
+    }
+
+    /// Creates an empty deque with reserved spaces at the front and the back.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let deque: LinearDeque<u32> = LinearDeque::with_reserved_space(3, 7);
+    ///
+    /// assert_eq!(deque.reserved_front_space(), 3);
+    /// assert_eq!(deque.reserved_back_space(), 7);
+    /// assert_eq!(deque.len(), 0);
+    /// ```
+    pub fn with_reserved_space(front: usize, back: usize) -> Self {
+        let mut buf = Buffer::new();
+
+        let cap = front + back;
+        if cap > 0 && !is_zst::<T>() {
+            buf.realloc(cap);
+        }
+
         LinearDeque {
-            buf: Buffer::new(),
+            buf,
             len: 0,
-            off: 0,
+            off: front,
         }
     }
 
@@ -187,12 +210,14 @@ impl<T> LinearDeque<T> {
     /// assert_eq!(d.front(), Some(&2));
     /// ```
     pub fn push_front(&mut self, elem: T) {
-        self.ensure_reserved_front_space();
-        unsafe {
-            self.off -= 1;
-            self.len += 1;
-            ptr::write(self.ptr().add(self.off), elem);
+        if !is_zst::<T>() {
+            self.ensure_reserved_front_space();
+            unsafe {
+                self.off -= 1;
+                ptr::write(self.ptr().add(self.off), elem);
+            }
         }
+        self.len += 1;
     }
 
     /// Appends an element to the back of the deque.
@@ -295,26 +320,28 @@ impl<T> LinearDeque<T> {
     pub fn insert(&mut self, index: usize, elem: T) {
         assert!(index <= self.len, "index out of bounds");
 
-        if 2 * index < self.len {
-            // near front
-            unsafe {
-                let pending_copy = self.prepare_reserved_front_space();
-                let (mut front_copy, back_copy) = pending_copy.split(index);
-                front_copy.dst -= 1;
-                back_copy.perform(self.ptr());
-                front_copy.perform(self.ptr());
-                self.off -= 1;
-                ptr::write(self.ptr().add(self.off + index), elem);
-            }
-        } else {
-            // near back
-            unsafe {
-                let pending_copy = self.prepare_reserved_back_space();
-                let (front_copy, mut back_copy) = pending_copy.split(index);
-                back_copy.dst += 1;
-                front_copy.perform(self.ptr());
-                back_copy.perform(self.ptr());
-                ptr::write(self.ptr().add(self.off + index), elem);
+        if !is_zst::<T>() {
+            if 2 * index < self.len {
+                // near front
+                unsafe {
+                    let pending_copy = self.prepare_reserved_front_space();
+                    let (mut front_copy, back_copy) = pending_copy.split(index);
+                    front_copy.dst -= 1;
+                    back_copy.perform(self.ptr());
+                    front_copy.perform(self.ptr());
+                    self.off -= 1;
+                    ptr::write(self.ptr().add(self.off + index), elem);
+                }
+            } else {
+                // near back
+                unsafe {
+                    let pending_copy = self.prepare_reserved_back_space();
+                    let (front_copy, mut back_copy) = pending_copy.split(index);
+                    back_copy.dst += 1;
+                    front_copy.perform(self.ptr());
+                    back_copy.perform(self.ptr());
+                    ptr::write(self.ptr().add(self.off + index), elem);
+                }
             }
         }
         self.len += 1;
@@ -478,12 +505,42 @@ impl<T> LinearDeque<T> {
         pending_copy
     }
 
-    fn reserved_front_space(&self) -> usize {
-        self.off
+    /// Returns the number of elements can be put at the front of the deque
+    /// without reallocating or moving existing elements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let buf: LinearDeque<i32> = LinearDeque::with_reserved_space(7, 3);
+    /// assert!(buf.reserved_front_space() == 7);
+    /// ```
+    pub fn reserved_front_space(&self) -> usize {
+        if is_zst::<T>() {
+            usize::MAX
+        } else {
+            self.off
+        }
     }
 
-    fn reserved_back_space(&self) -> usize {
-        self.cap() - self.len - self.off
+    /// Returns the number of elements can be put at the back of the deque
+    /// without reallocating or moving existing elements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let buf: LinearDeque<i32> = LinearDeque::with_reserved_space(7, 3);
+    /// assert!(buf.reserved_back_space() == 3);
+    /// ```
+    pub fn reserved_back_space(&self) -> usize {
+        if is_zst::<T>() {
+            usize::MAX
+        } else {
+            self.cap() - self.len - self.off
+        }
     }
 }
 
@@ -568,6 +625,40 @@ impl<T: Ord> Ord for LinearDeque<T> {
 impl<T: Hash> Hash for LinearDeque<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.deref().hash(state);
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for LinearDeque<T> {
+    /// Converts a `[T; N]` into a `LinearDeque<T>`.
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let deq = LinearDeque::from([1, 2, 3, 4]);
+    /// assert_eq!(deq, [1, 2, 3, 4]);
+    /// ```
+    fn from(value: [T; N]) -> Self {
+        Self::from_iter(value)
+    }
+}
+
+impl<T> From<Vec<T>> for LinearDeque<T> {
+    /// Turn a [`Vec<T>`] into a [`LinearDeque<T>`].
+    fn from(value: Vec<T>) -> Self {
+        Self::from_iter(value)
+    }
+}
+
+impl<T> FromIterator<T> for LinearDeque<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let (lower, upper) = iter.size_hint();
+        let size = upper.unwrap_or(lower);
+        let mut deque = Self::with_reserved_space(0, size);
+        for elem in iter {
+            deque.push_back(elem);
+        }
+        deque
     }
 }
 
@@ -664,6 +755,10 @@ impl<'a, T> Drop for Drain<'a, T> {
     }
 }
 
+fn is_zst<T>() -> bool {
+    mem::size_of::<T>() == 0
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::DefaultHasher;
@@ -742,6 +837,20 @@ mod tests {
     #[test]
     fn new_zst() {
         let deque: LinearDeque<()> = LinearDeque::new();
+
+        assert_zst_deque!(deque, 0);
+    }
+
+    #[test]
+    fn with_reserved_space() {
+        let deque: LinearDeque<char> = LinearDeque::with_reserved_space(3, 4);
+
+        assert_deque!(deque, 3, [], 4);
+    }
+
+    #[test]
+    fn with_reserved_space_zst() {
+        let deque: LinearDeque<()> = LinearDeque::with_reserved_space(3, 4);
 
         assert_zst_deque!(deque, 0);
     }
@@ -1140,6 +1249,34 @@ mod tests {
     }
 
     #[test]
+    fn reserved_front_space() {
+        let deque = prepare_deque(3, 'A'..='D', 4);
+
+        assert_eq!(deque.reserved_front_space(), 3);
+    }
+
+    #[test]
+    fn reserved_front_space_zst() {
+        let deque: LinearDeque<()> = prepare_zst_deque(5);
+
+        assert_eq!(deque.reserved_front_space(), usize::MAX);
+    }
+
+    #[test]
+    fn reserved_back_space() {
+        let deque = prepare_deque(3, 'A'..='D', 4);
+
+        assert_eq!(deque.reserved_back_space(), 4);
+    }
+
+    #[test]
+    fn reserved_back_space_zst() {
+        let deque: LinearDeque<()> = prepare_zst_deque(5);
+
+        assert_eq!(deque.reserved_back_space(), usize::MAX);
+    }
+
+    #[test]
     fn deref_empty() {
         let deque: LinearDeque<char> = prepare_deque(6, [], 4);
 
@@ -1270,5 +1407,19 @@ mod tests {
         deque2.hash(&mut hasher2);
 
         assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[test]
+    fn from_iter() {
+        let deque = LinearDeque::from_iter('A'..='D');
+
+        assert_deque!(deque, 0, ['A', 'B', 'C', 'D'], 0);
+    }
+
+    #[test]
+    fn from_iter_zst() {
+        let deque = LinearDeque::from_iter(std::iter::repeat(()).take(4));
+
+        assert_zst_deque!(deque, 4);
     }
 }
