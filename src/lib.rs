@@ -28,11 +28,12 @@
 //! [`VecDeque`]: std::collections::VecDeque
 //! [`make_contiguous`]: std::collections::VecDeque::make_contiguous
 
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
+use std::{cmp, mem};
 
 use buffer::Buffer;
 use iter::RawValIter;
@@ -56,7 +57,6 @@ mod drop_tracker;
 ///
 /// Since `LinearDeque` is a linear buffer, its elements are contiguous in
 /// memory, and it can be coerced into a slice at any time.
-#[derive(Debug)]
 pub struct LinearDeque<T> {
     buf: Buffer<T>,
     len: usize,
@@ -214,7 +214,7 @@ impl<T> LinearDeque<T> {
     /// ```
     pub fn push_front(&mut self, elem: T) {
         if !is_zst::<T>() {
-            self.ensure_reserved_front_space();
+            self.ensure_reserved_front_space(1);
             unsafe {
                 self.off -= 1;
                 ptr::write(self.ptr().add(self.off), elem);
@@ -236,7 +236,7 @@ impl<T> LinearDeque<T> {
     /// assert_eq!(3, *buf.back().unwrap());
     /// ```
     pub fn push_back(&mut self, elem: T) {
-        self.ensure_reserved_back_space();
+        self.ensure_reserved_back_space(1);
         unsafe {
             ptr::write(self.ptr().add(self.off + self.len), elem);
         }
@@ -327,7 +327,7 @@ impl<T> LinearDeque<T> {
             if 2 * index < self.len {
                 // near front
                 unsafe {
-                    let pending_copy = self.prepare_reserved_front_space();
+                    let pending_copy = self.prepare_reserved_front_space(1);
                     let (mut front_copy, back_copy) = pending_copy.split(index);
                     front_copy.dst -= 1;
                     back_copy.perform(self.ptr());
@@ -338,7 +338,7 @@ impl<T> LinearDeque<T> {
             } else {
                 // near back
                 unsafe {
-                    let pending_copy = self.prepare_reserved_back_space();
+                    let pending_copy = self.prepare_reserved_back_space(1);
                     let (front_copy, mut back_copy) = pending_copy.split(index);
                     back_copy.dst += 1;
                     front_copy.perform(self.ptr());
@@ -445,6 +445,62 @@ impl<T> LinearDeque<T> {
                 iter,
                 vec: PhantomData,
             }
+        }
+    }
+
+    /// Extends the deque at the front end.
+    ///
+    /// It's the same as iterating on the `iter` parameter, passing each element
+    /// to [`push_front`].
+    ///
+    /// [`push_front`]: LinearDeque::push_front
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::from([2, 1]);
+    /// deque.extend_at_front([3, 4]);
+    /// assert_eq!(deque, [4, 3, 2, 1]);
+    /// ```
+    pub fn extend_at_front(&mut self, iter: impl IntoIterator<Item = T>) {
+        let iter = iter.into_iter();
+        let (lower, upper) = iter.size_hint();
+        let count = upper.unwrap_or(lower);
+        if count < usize::MAX {
+            self.ensure_reserved_front_space(count);
+        }
+        for elem in iter {
+            self.push_front(elem);
+        }
+    }
+
+    /// Extends the deque at the back end.
+    ///
+    /// It's the same as iterating on the `iter` parameter, passing each element
+    /// to [`push_back`].
+    ///
+    /// [`push_back`]: LinearDeque::push_back
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::from([1, 2]);
+    /// deque.extend_at_back([3, 4]);
+    /// assert_eq!(deque, [1, 2, 3, 4]);
+    /// ```
+    pub fn extend_at_back(&mut self, iter: impl IntoIterator<Item = T>) {
+        let iter = iter.into_iter();
+        let (lower, upper) = iter.size_hint();
+        let count = upper.unwrap_or(lower);
+        if count < usize::MAX {
+            self.ensure_reserved_back_space(count);
+        }
+        for elem in iter {
+            self.push_back(elem);
         }
     }
 
@@ -598,62 +654,78 @@ impl<T> LinearDeque<T> {
         }
     }
 
-    fn ensure_reserved_front_space(&mut self) {
+    fn ensure_reserved_front_space(&mut self, count: usize) {
         unsafe {
-            let pending_copy = self.prepare_reserved_front_space();
+            let pending_copy = self.prepare_reserved_front_space(count);
             pending_copy.perform(self.ptr());
         }
     }
 
-    unsafe fn prepare_reserved_front_space(&mut self) -> PendingCopy {
+    unsafe fn prepare_reserved_front_space(&mut self, count: usize) -> PendingCopy {
         let mut pending_copy = PendingCopy {
             src: self.off,
             dst: self.off,
             count: self.len,
         };
 
-        if self.reserved_front_space() > 0 {
+        if self.reserved_front_space() >= count {
             // do nothing
-        } else if self.reserved_back_space() > self.len {
-            let moved_space = self.reserved_back_space() / 2;
-            pending_copy.dst += moved_space;
-            self.off += moved_space;
         } else {
-            let added_space = self.len.max(1);
-            self.buf.realloc(self.cap() + added_space);
-            pending_copy.dst += added_space;
-            self.off += added_space;
+            let total_reserved_space = self.cap() - self.len;
+            self.off = if total_reserved_space >= count {
+                (total_reserved_space + count) / 2
+            } else {
+                let growth = cmp::max(1, self.len);
+                let new_cap = if count > total_reserved_space + growth {
+                    self.len + count
+                } else {
+                    self.cap() + growth
+                };
+                self.buf.realloc(new_cap);
+                new_cap - self.len
+            };
+            pending_copy.dst = self.off;
         }
 
-        debug_assert!(self.reserved_front_space() > 0);
+        debug_assert!(self.reserved_front_space() >= count);
 
         pending_copy
     }
 
-    fn ensure_reserved_back_space(&mut self) {
+    fn ensure_reserved_back_space(&mut self, count: usize) {
         unsafe {
-            let pending_copy = self.prepare_reserved_back_space();
+            let pending_copy = self.prepare_reserved_back_space(count);
             pending_copy.perform(self.ptr());
         }
     }
 
-    unsafe fn prepare_reserved_back_space(&mut self) -> PendingCopy {
+    unsafe fn prepare_reserved_back_space(&mut self, count: usize) -> PendingCopy {
         let mut pending_copy = PendingCopy {
             src: self.off,
             dst: self.off,
             count: self.len,
         };
 
-        if self.reserved_back_space() > 0 {
+        if self.reserved_back_space() >= count {
             // do nothing
-        } else if self.reserved_front_space() > self.len {
-            self.off /= 2;
-            pending_copy.dst = self.off;
         } else {
-            self.buf.realloc(self.cap() + self.len.max(1));
+            let total_reserved_space = self.cap() - self.len;
+            self.off = if total_reserved_space >= count {
+                (total_reserved_space - count) / 2
+            } else {
+                let growth = cmp::max(1, self.len);
+                let new_cap = if count > total_reserved_space + growth {
+                    self.len + count
+                } else {
+                    self.cap() + growth
+                };
+                self.buf.realloc(new_cap);
+                0
+            };
+            pending_copy.dst = self.off;
         }
 
-        debug_assert!(self.reserved_back_space() > 0);
+        debug_assert!(self.reserved_back_space() >= count);
 
         pending_copy
     }
@@ -720,6 +792,26 @@ impl<T> Deref for LinearDeque<T> {
 impl<T> DerefMut for LinearDeque<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::slice::from_raw_parts_mut(self.ptr().add(self.off), self.len) }
+    }
+}
+
+impl<T> Extend<T> for LinearDeque<T> {
+    /// Extends the deque with the contents of the iterator.
+    ///
+    /// It is just an alias for [`extend_at_back`].
+    ///
+    /// [`extend_at_back`]: LinearDeque::extend_at_back
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.extend_at_back(iter);
+    }
+}
+
+impl<'a, T> Extend<&'a T> for LinearDeque<T>
+where
+    T: 'a + Copy,
+{
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        self.extend(iter.into_iter().copied());
     }
 }
 
@@ -815,7 +907,20 @@ impl<T> FromIterator<T> for LinearDeque<T> {
     }
 }
 
+impl<T: Debug> Debug for LinearDeque<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinearDeque")
+            .field("values", &self.deref())
+            .field(
+                "reserved_spaces",
+                &(self.reserved_front_space(), self.reserved_back_space()),
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
+#[must_use]
 struct PendingCopy {
     src: usize,
     dst: usize,
@@ -1059,66 +1164,34 @@ mod tests {
     }
 
     #[test]
-    fn push_front_growing() {
-        let mut deque: LinearDeque<char> = prepare_deque(0, [], 0);
-        // |[]|
+    fn push_front() {
+        let mut deque: LinearDeque<char> = prepare_deque(2, [], 1);
+        // |--[]-|
 
         deque.push_front('A');
 
-        // |[A]|
-        assert_deque!(deque, 0, ['A'], 0);
+        // |-[A]-|
+        assert_deque!(deque, 1, ['A'], 1);
 
         deque.push_front('B');
 
-        // |[BA]|
-        assert_deque!(deque, 0, ['B', 'A'], 0);
-
-        deque.push_front('C');
-
-        // |-[CBA]|
-        assert_deque!(deque, 1, ['C', 'B', 'A'], 0);
-
-        deque.push_front('D');
-
-        // |[DCBA]|
-        assert_deque!(deque, 0, ['D', 'C', 'B', 'A'], 0);
-
-        deque.push_front('E');
-
-        // |---[EDCBA]|
-        assert_deque!(deque, 3, ['E', 'D', 'C', 'B', 'A'], 0);
-    }
-
-    #[test]
-    fn push_front_using_reserved_back_space() {
-        let mut deque: LinearDeque<char> = prepare_deque(0, ['B', 'A'], 4);
-        // |[BA]----|
-
-        deque.push_front('C');
-
-        // |-[CBA]--|
-        assert_deque!(deque, 1, ['C', 'B', 'A'], 2);
-    }
-
-    #[test]
-    fn push_front_not_using_reserved_back_space() {
-        let mut deque: LinearDeque<char> = prepare_deque(0, ['B', 'A'], 1);
         // |[BA]-|
+        assert_deque!(deque, 0, ['B', 'A'], 1);
 
         deque.push_front('C');
 
-        // |-[CBA]-|
-        assert_deque!(deque, 1, ['C', 'B', 'A'], 1);
+        // |[CBA]|
+        assert_deque!(deque, 0, ['C', 'B', 'A'], 0);
 
         deque.push_front('D');
 
-        // |[DCBA]-|
-        assert_deque!(deque, 0, ['D', 'C', 'B', 'A'], 1);
+        // |--[DCBA]|
+        assert_deque!(deque, 2, ['D', 'C', 'B', 'A'], 0);
 
         deque.push_front('E');
 
-        // |---[EDCBA]-|
-        assert_deque!(deque, 3, ['E', 'D', 'C', 'B', 'A'], 1);
+        // |-[EDCBA]|
+        assert_deque!(deque, 1, ['E', 'D', 'C', 'B', 'A'], 0);
     }
 
     #[test]
@@ -1132,66 +1205,34 @@ mod tests {
     }
 
     #[test]
-    fn push_back_growing() {
-        let mut deque: LinearDeque<char> = prepare_deque(0, [], 0);
-        // |[]|
+    fn push_back() {
+        let mut deque: LinearDeque<char> = prepare_deque(1, [], 2);
+        // |-[]--|
 
         deque.push_back('A');
 
-        // |[A]|
-        assert_deque!(deque, 0, ['A'], 0);
+        // |-[A]-|
+        assert_deque!(deque, 1, ['A'], 1);
 
         deque.push_back('B');
 
-        // |[AB]|
-        assert_deque!(deque, 0, ['A', 'B'], 0);
-
-        deque.push_back('C');
-
-        // |[ABC]-|
-        assert_deque!(deque, 0, ['A', 'B', 'C'], 1);
-
-        deque.push_back('D');
-
-        // |[ABCD]|
-        assert_deque!(deque, 0, ['A', 'B', 'C', 'D'], 0);
-
-        deque.push_back('E');
-
-        // |[ABCDE]---|
-        assert_deque!(deque, 0, ['A', 'B', 'C', 'D', 'E'], 3);
-    }
-
-    #[test]
-    fn push_back_using_reserved_front_space() {
-        let mut deque: LinearDeque<char> = prepare_deque(4, ['A', 'B'], 0);
-        // |----[AB]|
-
-        deque.push_back('C');
-
-        // |--[ABC]-|
-        assert_deque!(deque, 2, ['A', 'B', 'C'], 1);
-    }
-
-    #[test]
-    fn push_back_not_using_reserved_front_space() {
-        let mut deque: LinearDeque<char> = prepare_deque(1, ['A', 'B'], 0);
         // |-[AB]|
+        assert_deque!(deque, 1, ['A', 'B'], 0);
 
         deque.push_back('C');
 
-        // |-[ABC]-|
-        assert_deque!(deque, 1, ['A', 'B', 'C'], 1);
+        // |[ABC]|
+        assert_deque!(deque, 0, ['A', 'B', 'C'], 0);
 
         deque.push_back('D');
 
-        // |-[ABCD]|
-        assert_deque!(deque, 1, ['A', 'B', 'C', 'D'], 0);
+        // |[ABCD]--|
+        assert_deque!(deque, 0, ['A', 'B', 'C', 'D'], 2);
 
         deque.push_back('E');
 
-        // |-[ABCDE]---|
-        assert_deque!(deque, 1, ['A', 'B', 'C', 'D', 'E'], 3);
+        // |[ABCDE]-|
+        assert_deque!(deque, 0, ['A', 'B', 'C', 'D', 'E'], 1);
     }
 
     #[test]
@@ -1285,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_near_front_using_reserved_front_space() {
+    fn insert_near_front() {
         let mut deque = prepare_deque(1, ['A', 'B', 'C'], 1);
         // |-[ABC]-|
 
@@ -1293,32 +1334,20 @@ mod tests {
 
         // |[AxBC]-|
         assert_deque!(deque, 0, ['A', 'x', 'B', 'C'], 1);
+
+        deque.insert(1, 'y');
+
+        // |[AyxBC]|
+        assert_deque!(deque, 0, ['A', 'y', 'x', 'B', 'C'], 0);
+
+        deque.insert(1, 'z');
+
+        // |----[AzyxBC]|
+        assert_deque!(deque, 4, ['A', 'z', 'y', 'x', 'B', 'C'], 0);
     }
 
     #[test]
-    fn insert_near_front_reallocating() {
-        let mut deque = prepare_deque(0, ['A', 'B', 'C'], 1);
-        // |[ABC]-|
-
-        deque.insert(1, 'x');
-
-        // |--[AxBC]-|
-        assert_deque!(deque, 2, ['A', 'x', 'B', 'C'], 1);
-    }
-
-    #[test]
-    fn insert_near_front_using_reserved_back_space() {
-        let mut deque = prepare_deque(0, ['A', 'B', 'C'], 4);
-        // |[ABC]----|
-
-        deque.insert(1, 'x');
-
-        // |-[AxBC]--|
-        assert_deque!(deque, 1, ['A', 'x', 'B', 'C'], 2);
-    }
-
-    #[test]
-    fn insert_near_back_using_reserved_back_space() {
+    fn insert_near_back() {
         let mut deque = prepare_deque(1, ['A', 'B', 'C'], 1);
         // |-[ABC]-|
 
@@ -1326,28 +1355,16 @@ mod tests {
 
         // |-[ABxC]|
         assert_deque!(deque, 1, ['A', 'B', 'x', 'C'], 0);
-    }
 
-    #[test]
-    fn insert_near_back_reallocating() {
-        let mut deque = prepare_deque(1, ['A', 'B', 'C'], 0);
-        // |-[ABC]|
+        deque.insert(3, 'y');
 
-        deque.insert(2, 'x');
+        // |[ABxyC]|
+        assert_deque!(deque, 0, ['A', 'B', 'x', 'y', 'C'], 0);
 
-        // |-[ABxC]--|
-        assert_deque!(deque, 1, ['A', 'B', 'x', 'C'], 2);
-    }
+        deque.insert(4, 'z');
 
-    #[test]
-    fn insert_near_back_using_reserved_front_space() {
-        let mut deque = prepare_deque(4, ['A', 'B', 'C'], 0);
-        // |----[ABC]|
-
-        deque.insert(2, 'x');
-
-        // |--[ABxC]-|
-        assert_deque!(deque, 2, ['A', 'B', 'x', 'C'], 1);
+        // |[ABxyzC]----|
+        assert_deque!(deque, 0, ['A', 'B', 'x', 'y', 'z', 'C'], 4);
     }
 
     #[test]
@@ -1431,6 +1448,46 @@ mod tests {
 
         assert_eq!(iter.count(), 4);
         assert_zst_deque!(deque, 0);
+    }
+
+    #[test]
+    fn extend_at_front() {
+        let mut deque = prepare_deque(1, ['C', 'D'], 1);
+        // |-[CD]-|
+
+        deque.extend_at_front(['B', 'A']);
+
+        // |[ABCD]|
+        assert_deque!(deque, 0, 'A'..='D', 0);
+    }
+
+    #[test]
+    fn extend_at_front_zst() {
+        let mut deque = prepare_zst_deque(2);
+
+        deque.extend_at_front(std::iter::repeat(()).take(4));
+
+        assert_zst_deque!(deque, 6);
+    }
+
+    #[test]
+    fn extend_at_back() {
+        let mut deque = prepare_deque(1, ['A', 'B'], 1);
+        // |-[AB]-|
+
+        deque.extend_at_back(['C', 'D']);
+
+        // |[ABCD]|
+        assert_deque!(deque, 0, 'A'..='D', 0);
+    }
+
+    #[test]
+    fn extend_at_back_zst() {
+        let mut deque = prepare_zst_deque(2);
+
+        deque.extend_at_back(std::iter::repeat(()).take(4));
+
+        assert_zst_deque!(deque, 6);
     }
 
     #[test]
@@ -1679,6 +1736,138 @@ mod tests {
 
         // |--[ABCD]-|
         assert_deque!(deque, 2, 'A'..='D', 1);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_doing_nothing_1() {
+        let mut deque = prepare_deque(3, 'A'..='C', 1);
+        // |---[ABC]-|
+
+        deque.ensure_reserved_front_space(1);
+
+        // |---[ABC]-|
+        assert_deque!(deque, 3, 'A'..='C', 1);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_doing_nothing_2() {
+        let mut deque = prepare_deque(3, 'A'..='C', 1);
+        // |---[ABC]-|
+
+        deque.ensure_reserved_front_space(3);
+
+        // |---[ABC]-|
+        assert_deque!(deque, 3, 'A'..='C', 1);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_moving_1() {
+        let mut deque = prepare_deque(1, 'A'..='C', 3);
+        // |-[ABC]---|
+
+        deque.ensure_reserved_front_space(2);
+
+        // |-**[ABC]-|
+        assert_deque!(deque, 3, 'A'..='C', 1);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_moving_2() {
+        let mut deque = prepare_deque(1, 'A'..='C', 3);
+        // |-[ABC]---|
+
+        deque.ensure_reserved_front_space(4);
+
+        // |****[ABC]|
+        assert_deque!(deque, 4, 'A'..='C', 0);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_reallocating_1() {
+        let mut deque = prepare_deque(2, 'A'..='C', 2);
+        // |--[ABC]--|
+
+        deque.ensure_reserved_front_space(5);
+
+        // |--*****[ABC]|
+        assert_deque!(deque, 7, 'A'..='C', 0);
+    }
+
+    #[test]
+    fn ensure_reserved_front_space_reallocating_2() {
+        let mut deque = prepare_deque(2, 'A'..='C', 2);
+        // |--[ABC]--|
+
+        deque.ensure_reserved_front_space(8);
+
+        // |********[ABC]|
+        assert_deque!(deque, 8, 'A'..='C', 0);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_doing_nothing_1() {
+        let mut deque = prepare_deque(1, 'A'..='C', 3);
+        // |-[ABC]---|
+
+        deque.ensure_reserved_back_space(1);
+
+        // |-[ABC]---|
+        assert_deque!(deque, 1, 'A'..='C', 3);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_doing_nothing_2() {
+        let mut deque = prepare_deque(1, 'A'..='C', 3);
+        // |-[ABC]---|
+
+        deque.ensure_reserved_back_space(3);
+
+        // |-[ABC]---|
+        assert_deque!(deque, 1, 'A'..='C', 3);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_moving_1() {
+        let mut deque = prepare_deque(3, 'A'..='C', 1);
+        // |---[ABC]-|
+
+        deque.ensure_reserved_back_space(2);
+
+        // |-[ABC]**-|
+        assert_deque!(deque, 1, 'A'..='C', 3);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_moving_2() {
+        let mut deque = prepare_deque(3, 'A'..='C', 1);
+        // |---[ABC]-|
+
+        deque.ensure_reserved_back_space(4);
+
+        // |[ABC]****|
+        assert_deque!(deque, 0, 'A'..='C', 4);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_reallocating_1() {
+        let mut deque = prepare_deque(2, 'A'..='C', 2);
+        // |--[ABC]--|
+
+        deque.ensure_reserved_back_space(5);
+
+        // |[ABC]*****--|
+        assert_deque!(deque, 0, 'A'..='C', 7);
+    }
+
+    #[test]
+    fn ensure_reserved_back_space_reallocating_2() {
+        let mut deque = prepare_deque(2, 'A'..='C', 2);
+        // |--[ABC]--|
+
+        deque.ensure_reserved_back_space(8);
+
+        // |[ABC]********|
+        assert_deque!(deque, 0, 'A'..='C', 8);
     }
 
     #[test]
