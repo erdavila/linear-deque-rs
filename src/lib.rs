@@ -28,6 +28,7 @@
 //! [`VecDeque`]: std::collections::VecDeque
 //! [`make_contiguous`]: std::collections::VecDeque::make_contiguous
 
+use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -504,6 +505,103 @@ impl<T> LinearDeque<T> {
         }
     }
 
+    /// Resizes the `LinearDeque` in-place at the front end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `LinearDeque` is extended by the
+    /// difference, with each additional slot at front filled with the result of
+    /// calling the closure `f`. The return values from `f` will end up in the
+    /// `LinearDeque` in the order they have been generated.
+    ///
+    /// If `new_len` is less than `len`, the `LinearDeque` is simply truncated.
+    ///
+    /// This method uses a closure to create new values on every push. If you'd
+    /// rather [`Clone`] a given value, use [`resize_at_front`]. If you want to
+    /// use the [`Default`] trait to generate values, you can pass
+    /// [`Default::default`] as the second argument.
+    ///
+    /// [`resize_at_front`]: LinearDeque::resize_at_front
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::from([1, 2, 3]);
+    /// deque.resize_at_front_with(5, Default::default);
+    /// assert_eq!(deque, [0, 0, 1, 2, 3]);
+    ///
+    /// let mut deque = LinearDeque::new();
+    /// let mut p = 1;
+    /// deque.resize_at_front_with(4, || { p *= 2; p });
+    /// assert_eq!(deque, [16, 8, 4, 2]);
+    /// ```
+    pub fn resize_at_front_with(&mut self, new_len: usize, mut f: impl FnMut() -> T) {
+        match new_len.cmp(&self.len) {
+            Ordering::Less => self.truncate_at_front(new_len),
+            Ordering::Equal => (),
+            Ordering::Greater => {
+                let count = new_len - self.len;
+                self.set_reserved_space(SetReservedSpace::GrowTo(count), SetReservedSpace::Keep);
+                self.extend_at_front(std::iter::from_fn(|| Some(f())).take(count))
+            }
+        }
+    }
+
+    /// Resizes the `LinearDeque` in-place at the back end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `LinearDeque` is extended by the
+    /// difference, with each additional slot at back filled with the result of
+    /// calling the closure `f`. The return values from `f` will end up in the
+    /// `LinearDeque` in the order they have been generated.
+    ///
+    /// If `new_len` is less than `len`, the `LinearDeque` is simply truncated.
+    ///
+    /// This method uses a closure to create new values on every push. If you'd
+    /// rather [`Clone`] a given value, use [`resize_at_back`]. If you want to
+    /// use the [`Default`] trait to generate values, you can pass
+    /// [`Default::default`] as the second argument.
+    ///
+    /// [`resize_at_back`]: LinearDeque::resize_at_back
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut deque = LinearDeque::from([1, 2, 3]);
+    /// deque.resize_at_back_with(5, Default::default);
+    /// assert_eq!(deque, [1, 2, 3, 0, 0]);
+    ///
+    /// let mut deque = LinearDeque::new();
+    /// let mut p = 1;
+    /// deque.resize_at_back_with(4, || { p *= 2; p });
+    /// assert_eq!(deque, [2, 4, 8, 16]);
+    /// ```
+    pub fn resize_at_back_with(&mut self, new_len: usize, mut f: impl FnMut() -> T) {
+        match new_len.cmp(&self.len) {
+            Ordering::Less => self.truncate_at_back(new_len),
+            Ordering::Equal => (),
+            Ordering::Greater => {
+                let count = new_len - self.len;
+                self.set_reserved_space(SetReservedSpace::Keep, SetReservedSpace::GrowTo(count));
+                self.extend_at_back(std::iter::from_fn(|| Some(f())).take(count));
+            }
+        }
+    }
+
+    /// Resizes the `LinearDeque` in-place at the back end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// It is just an alias for [`resize_at_back_with`].
+    ///
+    /// [`resize_at_back_with`]: LinearDeque::resize_at_back_with
+    #[inline]
+    pub fn resize_with(&mut self, new_len: usize, f: impl FnMut() -> T) {
+        self.resize_at_back_with(new_len, f);
+    }
+
     /// Shortens the deque, keeping the last `len` elements and dropping
     /// the rest.
     ///
@@ -766,6 +864,83 @@ impl<T> LinearDeque<T> {
         } else {
             self.cap() - self.len - self.off
         }
+    }
+}
+
+impl<T: Clone> LinearDeque<T> {
+    /// Resizes the `LinearDeque` in-place at the front end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `LinearDeque` is extended by the
+    /// difference, with clones of the `value` pushed at the front. If `new_len`
+    /// is less than `len`, the `LinearDeque` is simply truncated at the front.
+    ///
+    /// This method requires `T` to implement [`Clone`], in order to be able to
+    /// clone the passed value. If you need more flexibility (or want to rely on
+    /// [`Default`] instead of [`Clone`]), use [`resize_at_front_with`]. If you
+    /// only need to resize to a smaller size, use [`truncate_at_front`].
+    ///
+    /// [`resize_at_front_with`]: LinearDeque::resize_at_front_with
+    /// [`truncate_at_front`]: LinearDeque::truncate_at_front
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::from([5, 10, 15]);
+    ///
+    /// buf.resize_at_front(2, 0);
+    /// assert_eq!(buf, [10, 15]);
+    ///
+    /// buf.resize_at_front(5, 20);
+    /// assert_eq!(buf, [20, 20, 20, 10, 15]);
+    /// ```
+    pub fn resize_at_front(&mut self, new_len: usize, value: T) {
+        self.resize_at_front_with(new_len, || value.clone());
+    }
+
+    /// Resizes the `LinearDeque` in-place at the back end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `LinearDeque` is extended by the
+    /// difference, with clones of the `value` pushed at the back. If `new_len`
+    /// is less than `len`, the `LinearDeque` is simply truncated at the back.
+    ///
+    /// This method requires `T` to implement [`Clone`], in order to be able to
+    /// clone the passed value. If you need more flexibility (or want to rely on
+    /// [`Default`] instead of [`Clone`]), use [`resize_at_back_with`]. If you
+    /// only need to resize to a smaller size, use [`truncate_at_back`].
+    ///
+    /// [`resize_at_back_with`]: LinearDeque::resize_at_back_with
+    /// [`truncate_at_back`]: LinearDeque::truncate_at_back
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use linear_deque::LinearDeque;
+    ///
+    /// let mut buf = LinearDeque::from([5, 10, 15]);
+    ///
+    /// buf.resize_at_back(2, 0);
+    /// assert_eq!(buf, [5, 10]);
+    ///
+    /// buf.resize_at_back(5, 20);
+    /// assert_eq!(buf, [5, 10, 20, 20, 20]);
+    /// ```
+    pub fn resize_at_back(&mut self, new_len: usize, value: T) {
+        self.resize_at_back_with(new_len, || value.clone());
+    }
+
+    /// Resizes the `LinearDeque` in-place at the back end so that `len` is
+    /// equal to `new_len`.
+    ///
+    /// It is just an alias for [`resize_at_back`].
+    ///
+    /// [`resize_at_back`]: LinearDeque::resize_at_back
+    #[inline]
+    pub fn resize(&mut self, new_len: usize, value: T) {
+        self.resize_at_back(new_len, value);
     }
 }
 
@@ -1591,6 +1766,152 @@ mod tests {
         let iter = deque.into_iter();
 
         assert_eq!(iter.count(), 4);
+    }
+
+    #[test]
+    fn resize_at_front_larger() {
+        let mut deque = prepare_deque(2, ['A', 'B', 'C', 'D'], 3);
+        // |--[ABCD]---|
+
+        deque.resize_at_front(10, 'x');
+
+        // |[xxxxxxABCD]---|
+        assert_deque!(
+            deque,
+            0,
+            ['x', 'x', 'x', 'x', 'x', 'x', 'A', 'B', 'C', 'D'],
+            3
+        );
+    }
+
+    #[test]
+    fn resize_at_front_smaller() {
+        let mut deque = prepare_deque(2, ['A', 'B', 'C', 'D'], 3);
+        // |--[ABCD]---|
+
+        deque.resize_at_front(3, 'x');
+
+        // |---[BCD]---|
+        assert_deque!(deque, 3, ['B', 'C', 'D'], 3);
+    }
+
+    #[test]
+    fn resize_at_front_zst() {
+        let mut deque = prepare_zst_deque(5);
+
+        deque.resize_at_front(2, ());
+        assert_zst_deque!(deque, 2);
+
+        deque.resize_at_front(4, ());
+        assert_zst_deque!(deque, 4);
+    }
+
+    #[test]
+    fn resize_at_back_larger() {
+        let mut deque = prepare_deque(3, ['A', 'B', 'C', 'D'], 2);
+        // |---[ABCD]--|
+
+        deque.resize_at_back(10, 'x');
+
+        // |---[ABCDxxxxxx]|
+        assert_deque!(
+            deque,
+            3,
+            ['A', 'B', 'C', 'D', 'x', 'x', 'x', 'x', 'x', 'x'],
+            0
+        );
+    }
+
+    #[test]
+    fn resize_at_back_smaller() {
+        let mut deque = prepare_deque(3, ['A', 'B', 'C', 'D'], 2);
+        // |---[ABCD]--|
+
+        deque.resize_at_back(3, 'x');
+
+        // |---[ABC]---|
+        assert_deque!(deque, 3, ['A', 'B', 'C'], 3);
+    }
+
+    #[test]
+    fn resize_at_back_zst() {
+        let mut deque = prepare_zst_deque(5);
+
+        deque.resize_at_back(2, ());
+        assert_zst_deque!(deque, 2);
+
+        deque.resize_at_back(4, ());
+        assert_zst_deque!(deque, 4);
+    }
+
+    #[test]
+    fn resize_at_front_with_larger() {
+        let mut deque = prepare_deque(2, 'A'..='D', 3);
+        // |--[ABCD]---|
+        let mut chars = 'a'..;
+
+        deque.resize_at_front_with(7, || chars.next().unwrap());
+
+        // |[cbaABCD]---|
+        assert_deque!(deque, 0, ['c', 'b', 'a', 'A', 'B', 'C', 'D'], 3);
+    }
+
+    #[test]
+    fn resize_at_front_with_smaller() {
+        let mut deque = prepare_deque(2, 'A'..='D', 3);
+        // |--[ABCD]---|
+        let mut chars = 'a'..;
+
+        deque.resize_at_front_with(3, || chars.next().unwrap());
+
+        // |---[BCD]---|
+        assert_deque!(deque, 3, ['B', 'C', 'D'], 3);
+    }
+
+    #[test]
+    fn resize_at_front_with_zst() {
+        let mut deque = prepare_zst_deque(5);
+
+        deque.resize_at_front_with(2, || ());
+        assert_zst_deque!(deque, 2);
+
+        deque.resize_at_front_with(4, || ());
+        assert_zst_deque!(deque, 4);
+    }
+
+    #[test]
+    fn resize_at_back_with_larger() {
+        let mut deque = prepare_deque(3, 'A'..='D', 2);
+        // |---[ABCD]--|
+        let mut chars = 'a'..;
+
+        deque.resize_at_back_with(7, || chars.next().unwrap());
+
+        // |---[ABCDabc]|
+        assert_deque!(deque, 3, ['A', 'B', 'C', 'D', 'a', 'b', 'c'], 0);
+    }
+
+    #[test]
+    fn resize_at_back_with_smaller() {
+        let mut deque = prepare_deque(2, 'A'..='D', 3);
+        // |--[ABCD]---|
+        let mut chars = 'a'..;
+
+        deque.resize_at_back_with(3, || chars.next().unwrap());
+
+        // |--[ABC]----|
+        assert_deque!(deque, 2, ['A', 'B', 'C'], 4);
+    }
+
+    #[test]
+    fn resize_at_back_with_zst() {
+        let mut deque = prepare_zst_deque(5);
+
+        deque.resize_at_back_with(2, || ());
+        assert_zst_deque!(deque, 2);
+
+        deque.resize_at_back_with(4, || ());
+        assert_zst_deque!(deque, 4);
     }
 
     #[test]
