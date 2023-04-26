@@ -28,6 +28,7 @@
 //! [`VecDeque`]: std::collections::VecDeque
 //! [`make_contiguous`]: std::collections::VecDeque::make_contiguous
 
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -286,14 +287,10 @@ impl<T> LinearDeque<T> {
     /// deque.push_back('a');
     /// deque.push_back('b');
     /// deque.push_back('c');
-    /* TODO: Eq not implemented
     /// assert_eq!(deque, &['a', 'b', 'c']);
-     */
     ///
     /// deque.insert(1, 'd');
-    /* TODO: Eq not implemented
     /// assert_eq!(deque, &['a', 'd', 'b', 'c']);
-     */
     /// ```
     pub fn insert(&mut self, index: usize, elem: T) {
         assert!(index <= self.len, "index out of bounds");
@@ -339,14 +336,10 @@ impl<T> LinearDeque<T> {
     /// buf.push_back(1);
     /// buf.push_back(2);
     /// buf.push_back(3);
-    /* TODO: implement Eq
     /// assert_eq!(buf, [1, 2, 3]);
-     */
     ///
     /// assert_eq!(buf.remove(1), Some(2));
-    /* TODO: implement Eq
     /// assert_eq!(buf, [1, 3]);
-     */
     /// ```
     pub fn remove(&mut self, index: usize) -> Option<T> {
         if index < self.len {
@@ -537,6 +530,47 @@ impl<T> IntoIterator for LinearDeque<T> {
     }
 }
 
+macro_rules! impl_partial_eq {
+    ([$($n:tt)*] $rhs:ty) => {
+        impl<T, U, $($n)*> PartialEq<$rhs> for LinearDeque<T>
+        where
+            T: PartialEq<U>,
+        {
+            fn eq(&self, other: & $rhs) -> bool {
+                self.deref() == other.deref()
+            }
+        }
+    };
+}
+
+impl_partial_eq!([const N: usize] [U; N]);
+impl_partial_eq!([const N: usize] &[U; N]);
+impl_partial_eq!([const N: usize] &mut [U; N]);
+impl_partial_eq!([] & [U]);
+impl_partial_eq!([] &mut [U]);
+impl_partial_eq!([] Vec<U>);
+impl_partial_eq!([] LinearDeque<U>);
+
+impl<T: Eq> Eq for LinearDeque<T> {}
+
+impl<T: PartialOrd> PartialOrd for LinearDeque<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<T: Ord> Ord for LinearDeque<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<T: Hash> Hash for LinearDeque<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.deref().hash(state);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingCopy {
     src: usize,
@@ -632,7 +666,9 @@ impl<'a, T> Drop for Drain<'a, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
     use std::fmt::Debug;
+    use std::hash::{Hash, Hasher};
     use std::{mem, ptr};
 
     use crate::LinearDeque;
@@ -1176,5 +1212,63 @@ mod tests {
         let iter = deque.into_iter();
 
         assert_eq!(iter.count(), 4);
+    }
+
+    #[test]
+    fn eq() {
+        let mut array = ['A', 'B'];
+        let mut array_x = ['B', 'A'];
+
+        let deque = prepare_deque(1, array, 5);
+
+        {
+            let slice: &[_] = &array;
+            let slice_x: &[_] = &array_x;
+
+            assert!(deque == slice);
+            assert!(deque != slice_x);
+        }
+
+        assert!(deque == &array);
+        assert!(deque != &array_x);
+
+        {
+            let slice_mut: &mut [_] = &mut array;
+            let slice_mut_x: &mut [_] = &mut array_x;
+
+            assert!(deque == slice_mut);
+            assert!(deque != slice_mut_x);
+        }
+
+        assert!(deque == &mut array);
+        assert!(deque != &mut array_x);
+
+        assert!(deque == array);
+        assert!(deque != array_x);
+
+        assert!(deque == Vec::from(array));
+        assert!(deque != Vec::from(array_x));
+
+        assert!(deque == prepare_deque(5, array, 0));
+        assert!(deque != prepare_deque(1, array_x, 5));
+    }
+
+    #[test]
+    fn hash() {
+        let deque1 = prepare_deque(3, ['A', 'B', 'C'], 5);
+        let deque2 = {
+            let mut d = LinearDeque::new();
+            d.push_back('B');
+            d.push_front('A');
+            d.push_back('C');
+            d
+        };
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+
+        deque1.hash(&mut hasher1);
+        deque2.hash(&mut hasher2);
+
+        assert_eq!(hasher1.finish(), hasher2.finish());
     }
 }
