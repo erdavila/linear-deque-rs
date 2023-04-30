@@ -33,7 +33,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 use std::ptr;
 use std::{cmp, mem};
 
@@ -396,29 +396,21 @@ impl<T> LinearDeque<T> {
         }
     }
 
-    /// Removes all elements from the deque in bulk, returning all removed
+    /// Removes the specified range from the deque in bulk, returning all removed
     /// elements as an iterator. If the iterator is dropped before being fully
     /// consumed, it drops the remaining removed elements.
     ///
     /// The returned iterator keeps a mutable borrow on the queue to optimize
     /// its implementation.
     ///
-    /// After draining, the remaining unused allocated memory is equaly split
+    /// After draining, the remaining unused allocated memory is equally split
     /// as reserved space for both ends.
     ///
-    /* TODO: range parameter is not implemented.
     /// # Panics
     ///
     /// Panics if the starting point is greater than the end point or if
     /// the end point is greater than the length of the deque.
-     */
     ///
-    /// # Leaking
-    ///
-    /// If the returned iterator goes out of scope without being dropped (due to
-    /// [`mem::forget`], for example), the deque may have lost and leaked
-    /// elements arbitrarily, including elements outside the range.
-    /* TODO: range parameter.
     ///
     /// # Example
     ///
@@ -434,19 +426,55 @@ impl<T> LinearDeque<T> {
     /// deque.drain(..);
     /// assert!(deque.is_empty());
     /// ```
-     */
-    // TODO: implement range parameter.
-    pub fn drain(&mut self) -> Drain<T> {
-        unsafe {
-            let iter = RawValIter::new(self);
+    pub fn drain<R>(&mut self, range: R) -> Drain<T>
+    where
+        R: RangeBounds<usize>,
+    {
+        let start = match range.start_bound() {
+            Bound::Included(&start) => start,
+            Bound::Excluded(start) => start.checked_add(1).expect("invalid start index"),
+            Bound::Unbounded => 0,
+        };
 
-            self.len = 0;
-            self.off = self.cap() / 2;
+        let end = match range.end_bound() {
+            Bound::Included(end) => end.checked_add(1).expect("invalid end index"),
+            Bound::Excluded(&end) => end,
+            Bound::Unbounded => self.len,
+        };
 
-            Drain {
-                iter,
-                vec: PhantomData,
+        if start > end || end > self.len {
+            panic!("invalid range");
+        }
+
+        let iter = unsafe { RawValIter::new(&self[start..end]) };
+
+        let front_len = start;
+        let back_len = self.len - end;
+        let count = end - start;
+
+        let pending_copy = if front_len < back_len {
+            let prev_off = self.off;
+            self.off += count;
+            PendingCopy {
+                src: prev_off,
+                dst: prev_off + count,
+                count: front_len,
             }
+        } else {
+            PendingCopy {
+                src: self.off + end,
+                dst: self.off + start,
+                count: back_len,
+            }
+        };
+
+        self.len -= count;
+
+        Drain {
+            iter,
+            pending_copy,
+            ptr: self.ptr(),
+            vec: PhantomData,
         }
     }
 
@@ -1298,6 +1326,8 @@ impl<T> Drop for IntoIter<T> {
 pub struct Drain<'a, T: 'a> {
     vec: PhantomData<&'a mut LinearDeque<T>>,
     iter: RawValIter<T>,
+    pending_copy: PendingCopy,
+    ptr: *mut T,
 }
 
 impl<'a, T> Iterator for Drain<'a, T> {
@@ -1315,6 +1345,9 @@ impl<'a, T> Iterator for Drain<'a, T> {
 impl<'a, T> Drop for Drain<'a, T> {
     fn drop(&mut self) {
         for _ in &mut *self {}
+        unsafe {
+            self.pending_copy.perform(self.ptr);
+        }
     }
 }
 
@@ -1708,28 +1741,112 @@ mod tests {
     }
 
     #[test]
-    fn drain() {
-        let mut deque = prepare_deque(2, ['A', 'B', 'C'], 5);
-        // |--[ABC]-----|
+    fn drain_all() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
 
-        let mut iter = deque.drain();
+        let drained = deque.drain(..);
 
-        assert_eq!(iter.next(), Some('A'));
-        assert_eq!(iter.next(), Some('B'));
-        assert_eq!(iter.next(), Some('C'));
-        assert_eq!(iter.next(), None);
-        drop(iter);
-        // |-----[]-----|
-        assert_deque!(deque, 5, [], 5);
+        assert_eq!(drained.collect::<Vec<_>>(), Vec::from_iter('A'..='H'));
+        // There is no requirement for exact reserved space distribution in this case
+        // |--..........--]
+        assert_eq!(deque.cap(), 12);
+        assert!(deque.reserved_front_space() >= 2);
+        assert!(deque.reserved_back_space() >= 2);
+        assert!(deque.is_empty());
+    }
+
+    #[test]
+    fn drain_start() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
+
+        let drained = deque.drain(..3);
+
+        assert_eq!(drained.collect::<Vec<_>>(), Vec::from_iter('A'..='C'));
+        // |-----[DEFGH]--]
+        assert_deque!(deque, 5, 'D'..='H', 2);
+    }
+
+    #[test]
+    fn drain_end() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
+
+        let drained = deque.drain(5..);
+
+        assert_eq!(drained.collect::<Vec<_>>(), Vec::from_iter('F'..='H'));
+        // |--[ABCDE]-----]
+        assert_deque!(deque, 2, 'A'..='E', 5);
+    }
+
+    #[test]
+    fn drain_near_start() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
+
+        let drained = deque.drain(1..5);
+
+        assert_eq!(drained.collect::<Vec<_>>(), Vec::from_iter('B'..='E'));
+        // |------[AFGH]--]
+        assert_deque!(deque, 6, ['A', 'F', 'G', 'H'], 2);
+    }
+
+    #[test]
+    fn drain_near_end() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
+
+        let drained = deque.drain(3..7);
+
+        assert_eq!(drained.collect::<Vec<_>>(), Vec::from_iter('D'..='G'));
+        // |--[ABCH]------]
+        assert_deque!(deque, 2, ['A', 'B', 'C', 'H'], 6);
+    }
+
+    #[test]
+    fn drain_nothing() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--]
+
+        let drained = deque.drain(3..3);
+
+        assert_eq!(drained.count(), 0);
+        // |--[ABCDEFGH]--]
+        assert_deque!(deque, 2, 'A'..='H', 2);
+    }
+
+    #[test]
+    fn drain_not_fully_consumed() {
+        let mut deque = prepare_deque(2, 'A'..='H', 2);
+        // |--[ABCDEFGH]--|
+
+        let mut drained = deque.drain(3..7);
+        assert_eq!(drained.next(), Some('D'));
+        drop(drained);
+
+        // |--[ABCH]------]
+        assert_deque!(deque, 2, ['A', 'B', 'C', 'H'], 6);
     }
 
     #[test]
     fn drain_zst() {
-        let mut deque: LinearDeque<()> = prepare_zst_deque(4);
+        let mut deque: LinearDeque<()> = prepare_zst_deque(8);
 
-        let iter = deque.drain();
+        let iter = deque.drain(3..5);
+        assert_eq!(iter.count(), 2);
+        assert_zst_deque!(deque, 6);
 
-        assert_eq!(iter.count(), 4);
+        let iter = deque.drain(4..);
+        assert_eq!(iter.count(), 2);
+        assert_zst_deque!(deque, 4);
+
+        let iter = deque.drain(..2);
+        assert_eq!(iter.count(), 2);
+        assert_zst_deque!(deque, 2);
+
+        let iter = deque.drain(..);
+        assert_eq!(iter.count(), 2);
         assert_zst_deque!(deque, 0);
     }
 
