@@ -1,6 +1,6 @@
 [package]
 name = "linear-deque"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A double-ended queue that can be sliced at any time without preparation."
 authors = ["Eduardo R. D'Avila <erdavila@gmail.com>"]

@@ -1,8 +1,6 @@
 # A double-ended queue that can be sliced at any time without preparation.
 
-# [`LinearDeque`] vs [`VecDeque`]
-
-## Slicing
+## [`LinearDeque`] vs [`VecDeque`]
 
 The standard [`VecDeque`] uses a ring buffer. It requires that the
 [`make_contiguous`] method is called to ensure that the deque content can
