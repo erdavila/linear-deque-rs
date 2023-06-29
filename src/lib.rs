@@ -1217,6 +1217,16 @@ impl Write for LinearDeque<u8> {
     }
 }
 
+impl<T: Clone> Clone for LinearDeque<T> {
+    fn clone(&self) -> Self {
+        let mut clone = Self::with_reserved_space(0, self.len);
+        for elem in self.iter() {
+            clone.push_back(elem.clone());
+        }
+        clone
+    }
+}
+
 impl<T: Debug> Debug for LinearDeque<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinearDeque")
@@ -2602,5 +2612,18 @@ mod tests {
         assert_eq!(result.unwrap(), 5);
         // |[ABCDEFGH]-|
         assert_deque!(deque, 0, b'A'..=b'H', 1);
+    }
+
+    #[test]
+    fn clone() {
+        let mut deque = prepare_deque(2, 'A'..='C', 1);
+        // |--[ABC]-|
+
+        let mut clone = deque.clone();
+
+        deque[1] = 'x';
+        clone[1] = 'y';
+        assert_deque!(deque, 2, ['A', 'x', 'C'], 1);
+        assert_deque!(clone, 0, ['A', 'y', 'C'], 0);
     }
 }
