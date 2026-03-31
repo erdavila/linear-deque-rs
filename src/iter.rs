@@ -8,15 +8,17 @@ pub struct RawValIter<T> {
 
 impl<T> RawValIter<T> {
     pub unsafe fn new(slice: &[T]) -> Self {
-        RawValIter {
-            start: slice.as_ptr(),
-            end: if mem::size_of::<T>() == 0 {
-                ((slice.as_ptr() as usize) + slice.len()) as *const _
-            } else if slice.is_empty() {
-                slice.as_ptr()
-            } else {
-                slice.as_ptr().add(slice.len())
-            },
+        unsafe {
+            RawValIter {
+                start: slice.as_ptr(),
+                end: if mem::size_of::<T>() == 0 {
+                    ((slice.as_ptr() as usize) + slice.len()) as *const _
+                } else if slice.is_empty() {
+                    slice.as_ptr()
+                } else {
+                    slice.as_ptr().add(slice.len())
+                },
+            }
         }
     }
 }

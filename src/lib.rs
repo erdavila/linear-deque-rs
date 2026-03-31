@@ -426,7 +426,7 @@ impl<T> LinearDeque<T> {
     /// deque.drain(..);
     /// assert!(deque.is_empty());
     /// ```
-    pub fn drain<R>(&mut self, range: R) -> Drain<T>
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T>
     where
         R: RangeBounds<usize>,
     {
@@ -954,11 +954,7 @@ impl<T> LinearDeque<T> {
     /// assert!(buf.reserved_front_space() == 7);
     /// ```
     pub fn reserved_front_space(&self) -> usize {
-        if is_zst::<T>() {
-            usize::MAX
-        } else {
-            self.off
-        }
+        if is_zst::<T>() { usize::MAX } else { self.off }
     }
 
     /// Returns the number of elements can be put at the back of the deque
@@ -1249,8 +1245,10 @@ struct PendingCopy {
 
 impl PendingCopy {
     unsafe fn perform<T>(self, ptr: *mut T) {
-        if self.count > 0 && self.src != self.dst {
-            ptr::copy(ptr.add(self.src), ptr.add(self.dst), self.count);
+        unsafe {
+            if self.count > 0 && self.src != self.dst {
+                ptr::copy(ptr.add(self.src), ptr.add(self.dst), self.count);
+            }
         }
     }
 
