@@ -36,7 +36,7 @@ impl<T> Iterator for RawValIter<T> {
                     Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
                     let old_ptr = self.start;
-                    self.start = self.start.offset(1);
+                    self.start = self.start.add(1);
                     Some(ptr::read(old_ptr))
                 }
             }
@@ -59,7 +59,7 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
                     self.end = (self.end as usize - 1) as *const _;
                     Some(ptr::read(NonNull::<T>::dangling().as_ptr()))
                 } else {
-                    self.end = self.end.offset(-1);
+                    self.end = self.end.sub(1);
                     Some(ptr::read(self.end))
                 }
             }

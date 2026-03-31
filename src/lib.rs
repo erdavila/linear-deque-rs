@@ -86,6 +86,7 @@ impl<T> LinearDeque<T> {
     /// # #[allow(unused)]
     /// let deque: LinearDeque<u32> = LinearDeque::new();
     /// ```
+    #[must_use]
     pub fn new() -> Self {
         Self::with_reserved_space(0, 0)
     }
@@ -103,6 +104,7 @@ impl<T> LinearDeque<T> {
     /// assert_eq!(deque.reserved_back_space(), 7);
     /// assert_eq!(deque.len(), 0);
     /// ```
+    #[must_use]
     pub fn with_reserved_space(front: usize, back: usize) -> Self {
         let mut buf = Buffer::new();
 
@@ -133,6 +135,7 @@ impl<T> LinearDeque<T> {
     /// d.push_back(2);
     /// assert_eq!(d.front(), Some(&1));
     /// ```
+    #[must_use]
     pub fn front(&self) -> Option<&T> {
         self.first()
     }
@@ -175,6 +178,7 @@ impl<T> LinearDeque<T> {
     /// d.push_back(2);
     /// assert_eq!(d.back(), Some(&2));
     /// ```
+    #[must_use]
     pub fn back(&self) -> Option<&T> {
         self.last()
     }
@@ -442,9 +446,7 @@ impl<T> LinearDeque<T> {
             Bound::Unbounded => self.len,
         };
 
-        if start > end || end > self.len {
-            panic!("invalid range");
-        }
+        assert!(!(start > end || end > self.len), "invalid range");
 
         let iter = unsafe { RawValIter::new(&self[start..end]) };
 
@@ -572,7 +574,7 @@ impl<T> LinearDeque<T> {
             Ordering::Greater => {
                 let count = new_len - self.len;
                 self.set_reserved_space(SetReservedSpace::GrowTo(count), SetReservedSpace::Keep);
-                self.extend_at_front(std::iter::from_fn(|| Some(f())).take(count))
+                self.extend_at_front(std::iter::from_fn(|| Some(f())).take(count));
             }
         }
     }
@@ -825,14 +827,6 @@ impl<T> LinearDeque<T> {
     /// assert_eq!(deque.reserved_back_space(), 7);
     /// ```
     pub fn set_reserved_space(&mut self, front: SetReservedSpace, back: SetReservedSpace) {
-        if is_zst::<T>() {
-            return;
-        }
-
-        let front_space = self.reserved_front_space();
-        let back_space = self.reserved_back_space();
-        let cap = self.cap();
-
         fn new_space(current: usize, set: SetReservedSpace) -> usize {
             match set {
                 SetReservedSpace::Keep => current,
@@ -841,6 +835,14 @@ impl<T> LinearDeque<T> {
                 SetReservedSpace::Exact(new) => new,
             }
         }
+
+        if is_zst::<T>() {
+            return;
+        }
+
+        let front_space = self.reserved_front_space();
+        let back_space = self.reserved_back_space();
+        let cap = self.cap();
 
         let new_front_space = new_space(front_space, front);
         let new_back_space = new_space(back_space, back);
@@ -885,7 +887,7 @@ impl<T> LinearDeque<T> {
         } else {
             let total_reserved_space = self.cap() - self.len;
             self.off = if total_reserved_space >= count {
-                (total_reserved_space + count) / 2
+                usize::midpoint(total_reserved_space, count)
             } else {
                 let growth = cmp::max(1, self.len);
                 let new_cap = if count > total_reserved_space + growth {
@@ -953,6 +955,7 @@ impl<T> LinearDeque<T> {
     /// let buf: LinearDeque<i32> = LinearDeque::with_reserved_space(7, 3);
     /// assert!(buf.reserved_front_space() == 7);
     /// ```
+    #[must_use]
     pub fn reserved_front_space(&self) -> usize {
         if is_zst::<T>() { usize::MAX } else { self.off }
     }
@@ -968,6 +971,7 @@ impl<T> LinearDeque<T> {
     /// let buf: LinearDeque<i32> = LinearDeque::with_reserved_space(7, 3);
     /// assert!(buf.reserved_back_space() == 3);
     /// ```
+    #[must_use]
     pub fn reserved_back_space(&self) -> usize {
         if is_zst::<T>() {
             usize::MAX
@@ -1109,7 +1113,7 @@ impl<T> IntoIterator for LinearDeque<T> {
         unsafe {
             let iter = RawValIter::new(&self);
 
-            let buf = ptr::read(&self.buf);
+            let buf = ptr::read(&raw const self.buf);
             mem::forget(self);
 
             IntoIter { iter, _buf: buf }
@@ -1194,7 +1198,7 @@ impl<T> FromIterator<T> for LinearDeque<T> {
 
 impl Read for LinearDeque<u8> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let result = (self.deref() as &[u8]).read(buf);
+        let result = (&*self as &[u8]).read(buf);
         if let Ok(ref count) = result {
             self.truncate_at_front(self.len - count);
         }
@@ -1226,7 +1230,7 @@ impl<T: Clone> Clone for LinearDeque<T> {
 impl<T: Debug> Debug for LinearDeque<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinearDeque")
-            .field("values", &self.deref())
+            .field("values", &&**self)
             .field(
                 "reserved_spaces",
                 &(self.reserved_front_space(), self.reserved_back_space()),
@@ -1338,7 +1342,7 @@ pub struct Drain<'a, T: 'a> {
     ptr: *mut T,
 }
 
-impl<'a, T> Iterator for Drain<'a, T> {
+impl<T> Iterator for Drain<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1350,7 +1354,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
     }
 }
 
-impl<'a, T> Drop for Drain<'a, T> {
+impl<T> Drop for Drain<'_, T> {
     fn drop(&mut self) {
         for _ in &mut *self {}
         unsafe {

@@ -35,11 +35,11 @@ impl<T> Buffer<T> {
             unsafe { alloc::alloc(new_layout) }
         } else {
             let old_layout = Layout::array::<T>(self.cap).unwrap();
-            let old_ptr = self.ptr.as_ptr() as *mut u8;
+            let old_ptr = self.ptr.as_ptr().cast::<u8>();
             unsafe { alloc::realloc(old_ptr, old_layout, new_layout.size()) }
         };
 
-        self.ptr = match NonNull::new(new_ptr as *mut T) {
+        self.ptr = match NonNull::new(new_ptr.cast::<T>()) {
             Some(p) => p,
             None => alloc::handle_alloc_error(new_layout),
         };
@@ -54,7 +54,7 @@ impl<T> Drop for Buffer<T> {
         if self.cap != 0 && elem_size != 0 {
             unsafe {
                 alloc::dealloc(
-                    self.ptr.as_ptr() as *mut u8,
+                    self.ptr.as_ptr().cast::<u8>(),
                     Layout::array::<T>(self.cap).unwrap(),
                 );
             }
