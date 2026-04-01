@@ -1,5 +1,5 @@
-use std::mem;
-use std::ptr::{self, NonNull};
+use core::mem;
+use core::ptr::{self, NonNull};
 
 pub struct RawValIter<T> {
     start: *const T,

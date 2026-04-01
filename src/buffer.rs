@@ -1,6 +1,9 @@
-use std::alloc::{self, Layout};
-use std::mem;
-use std::ptr::NonNull;
+extern crate alloc as alloc_crate;
+use alloc_crate::alloc;
+
+use alloc::Layout;
+use core::mem;
+use core::ptr::NonNull;
 
 #[derive(Debug)]
 pub struct Buffer<T> {

@@ -1,3 +1,4 @@
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![warn(missing_docs)]
 #![doc(test(attr(deny(warnings))))]
 
@@ -23,19 +24,38 @@
 //! ends.
 //!
 //! Using a linear buffer, each end of the [`LinearDeque`] have its own reserved
-//! memory, so it tends to use more memory than [`VecDeque`].
+//! memory, so it tends to use more memory a do more re-allocations than [`VecDeque`].
+//!
+//!  # `no_std`, `alloc` and the `std` feature
+//!
+//! For backward compatibility, this crate uses [`std`] by default. The `std` feature
+//! can be disabled to use this crate in a `no_std` environment. In that case, the crate
+//! will use the [`alloc`] crate instead of [`std`] for heap allocation and other utilities.
+//!
+//!  The only functionality that is gated behind the `std` feature is the implementation of
+//! [`Read`] and [`Write`] traits for `LinearDeque<u8>`.
+//!
+//! To disable the `std` feature, add the following to the `dependencies` in your `Cargo.toml`:
+//!
+//! ```toml
+//! linear-deque = { version = "0.1", default-features = false }
+//!  ```
 //!
 //! [`VecDeque`]: std::collections::VecDeque
 //! [`make_contiguous`]: std::collections::VecDeque::make_contiguous
 
-use std::cmp::Ordering;
-use std::fmt::Debug;
-use std::hash::Hash;
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::fmt::Debug;
+use core::hash::Hash;
+use core::marker::PhantomData;
+use core::ops::{Bound, Deref, DerefMut, RangeBounds};
+use core::ptr;
+use core::{cmp, mem};
+#[cfg(feature = "std")]
 use std::io::{Read, Write};
-use std::marker::PhantomData;
-use std::ops::{Bound, Deref, DerefMut, RangeBounds};
-use std::ptr;
-use std::{cmp, mem};
 
 use buffer::Buffer;
 use iter::RawValIter;
@@ -574,7 +594,7 @@ impl<T> LinearDeque<T> {
             Ordering::Greater => {
                 let count = new_len - self.len;
                 self.set_reserved_space(SetReservedSpace::GrowTo(count), SetReservedSpace::Keep);
-                self.extend_at_front(std::iter::from_fn(|| Some(f())).take(count));
+                self.extend_at_front(core::iter::from_fn(|| Some(f())).take(count));
             }
         }
     }
@@ -617,7 +637,7 @@ impl<T> LinearDeque<T> {
             Ordering::Greater => {
                 let count = new_len - self.len;
                 self.set_reserved_space(SetReservedSpace::Keep, SetReservedSpace::GrowTo(count));
-                self.extend_at_back(std::iter::from_fn(|| Some(f())).take(count));
+                self.extend_at_back(core::iter::from_fn(|| Some(f())).take(count));
             }
         }
     }
@@ -1074,13 +1094,13 @@ impl<T> Deref for LinearDeque<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.ptr().add(self.off), self.len) }
+        unsafe { core::slice::from_raw_parts(self.ptr().add(self.off), self.len) }
     }
 }
 
 impl<T> DerefMut for LinearDeque<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr().add(self.off), self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.ptr().add(self.off), self.len) }
     }
 }
 
@@ -1145,19 +1165,19 @@ impl_partial_eq!([] LinearDeque<U>);
 impl<T: Eq> Eq for LinearDeque<T> {}
 
 impl<T: PartialOrd> PartialOrd for LinearDeque<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.iter().partial_cmp(other.iter())
     }
 }
 
 impl<T: Ord> Ord for LinearDeque<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.iter().cmp(other.iter())
     }
 }
 
 impl<T: Hash> Hash for LinearDeque<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.deref().hash(state);
     }
 }
@@ -1196,6 +1216,7 @@ impl<T> FromIterator<T> for LinearDeque<T> {
     }
 }
 
+#[cfg(feature = "std")]
 impl Read for LinearDeque<u8> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let result = (&*self as &[u8]).read(buf);
@@ -1206,6 +1227,7 @@ impl Read for LinearDeque<u8> {
     }
 }
 
+#[cfg(feature = "std")]
 impl Write for LinearDeque<u8> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.extend(buf);
@@ -1228,7 +1250,7 @@ impl<T: Clone> Clone for LinearDeque<T> {
 }
 
 impl<T: Debug> Debug for LinearDeque<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LinearDeque")
             .field("values", &&**self)
             .field(
@@ -1369,11 +1391,11 @@ fn is_zst<T>() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use core::fmt::Debug;
+    use core::hash::{Hash as _, Hasher};
+    use core::{mem, ptr};
     use std::collections::hash_map::DefaultHasher;
-    use std::fmt::Debug;
-    use std::hash::{Hash, Hasher};
-    use std::io::{Read, Write};
-    use std::{mem, ptr};
+    use std::io::{Read as _, Write as _};
 
     use crate::drop_tracker::DropTracker;
     use crate::{LinearDeque, SetReservedSpace};

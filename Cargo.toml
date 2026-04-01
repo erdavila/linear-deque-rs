@@ -12,5 +12,9 @@ exclude = ["build.sh"]
 
 [dependencies]
 
+[features]
+default = ["std"]
+std = []
+
 [lints.clippy]
 pedantic = "warn"
